@@ -2,17 +2,30 @@ plugins {
     id 'java'
 }
 
-group = 'org.markski.bloglog'
+group = 'org.markski.blocklog'
 version = '1.0-SNAPSHOT'
+
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
 
 repositories {
     mavenCentral()
+    maven {
+        url = 'https://repo.papermc.io/repository/maven-public/'
+    }
 }
 
 dependencies {
-    testImplementation platform('org.junit:junit-bom:5.10.0')
-    testImplementation 'org.junit.jupiter:junit-jupiter'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    compileOnly 'io.papermc.paper:paper-api:1.21.10-R0.1-SNAPSHOT'
+}
+
+tasks.jar {
+    archiveBaseName.set('blocklog')
+    archiveVersion.set(version)
 }
 
 test {
