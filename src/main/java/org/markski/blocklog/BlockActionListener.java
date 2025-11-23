@@ -20,7 +20,7 @@ public class BlockActionListener implements Listener {
         Player player = event.getPlayer();
         Block block = event.getBlock();
 
-        logAction(player, block, "BROKEN", "PLAYER");
+        logAction(player, block, BlockActionType.BROKEN, BlockActionCause.PLAYER);
     }
 
     @EventHandler
@@ -28,10 +28,13 @@ public class BlockActionListener implements Listener {
         Player player = event.getPlayer();
         Block block = event.getBlockPlaced();
 
-        logAction(player, block, "PLACED", "PLAYER");
+        logAction(player, block, BlockActionType.PLACED, BlockActionCause.PLAYER);
     }
 
-    private void logAction(Player player, Block block, String action, String cause) {
+    private void logAction(Player player,
+                           Block block,
+                           BlockActionType action,
+                           BlockActionCause cause) {
         var db = plugin.getDatabase();
         if (db == null || db.getConnection() == null) {
             // DB not ready; avoid NPEs

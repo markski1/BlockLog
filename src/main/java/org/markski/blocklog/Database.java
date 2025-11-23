@@ -68,13 +68,31 @@ public class Database {
                     y            INTEGER NOT NULL,
                     z            INTEGER NOT NULL,
                     block_type   TEXT    NOT NULL,
-                    action       TEXT    NOT NULL,
+                    action       INTEGER NOT NULL,  -- BlockActionType code
                     created_at   INTEGER NOT NULL,
-                    cause        TEXT
+                    cause        INTEGER            -- BlockActionCause code, nullable
                 );
                 """;
 
         try (Statement stmt = connection.createStatement()) {
+            stmt.execute(sql);
+
+            sql = """
+                    CREATE INDEX IF NOT EXISTS idx_block_actions_world_xyz
+                    ON block_actions (world, x, y, z);
+                    """;
+            stmt.execute(sql);
+
+            sql = """
+                    CREATE INDEX IF NOT EXISTS idx_block_actions_player_time
+                    ON block_actions (player_uuid, created_at);
+                    """;
+            stmt.execute(sql);
+
+            sql = """
+                    CREATE INDEX IF NOT EXISTS idx_block_actions_created_at
+                    ON block_actions (created_at);
+                    """;
             stmt.execute(sql);
         }
     }
@@ -87,9 +105,9 @@ public class Database {
             int y,
             int z,
             String blockType,
-            String action,
+            BlockActionType action,
             long createdAt,
-            String cause
+            BlockActionCause cause
     ) throws SQLException {
         String sql = """
                 INSERT INTO block_actions (
@@ -114,12 +132,12 @@ public class Database {
             ps.setInt(5, y);
             ps.setInt(6, z);
             ps.setString(7, blockType);
-            ps.setString(8, action);
+            ps.setInt(8, action.getCode());
             ps.setLong(9, createdAt);
             if (cause != null) {
-                ps.setString(10, cause);
+                ps.setInt(10, cause.getCode());
             } else {
-                ps.setNull(10, java.sql.Types.VARCHAR);
+                ps.setNull(10, java.sql.Types.INTEGER);
             }
             ps.executeUpdate();
         }
