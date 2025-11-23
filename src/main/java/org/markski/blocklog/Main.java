@@ -22,6 +22,10 @@ public class Main extends JavaPlugin {
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
+
+        getServer().getPluginManager().registerEvents(new BlockActionListener(this), this);
+
+        getLogger().info("BlockLog loaded.");
     }
 
     @Override
@@ -42,5 +46,9 @@ public class Main extends JavaPlugin {
             return true;
         }
         return false;
+    }
+
+    public Database getDatabase() {
+        return database;
     }
 }
