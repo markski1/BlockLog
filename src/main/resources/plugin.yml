@@ -7,5 +7,5 @@ authors: [ "Markski" ]
 
 commands:
   bkl:
-    description: Shows info about the BlockLog plugin.
+    description: Shows info about the block you're looking at.
     usage: /bkl

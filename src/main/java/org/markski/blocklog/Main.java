@@ -3,6 +3,7 @@ package org.markski.blocklog;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.sql.SQLException;
+import java.util.Objects;
 
 public class Main extends JavaPlugin {
 
@@ -24,6 +25,12 @@ public class Main extends JavaPlugin {
         }
 
         getServer().getPluginManager().registerEvents(new BlockActionListener(this), this);
+
+        if (getCommand("bkl") != null) {
+            Objects.requireNonNull(getCommand("bkl")).setExecutor(new BklCommand(this));
+        } else {
+            getLogger().severe("Command 'bkl' not defined in plugin.yml");
+        }
 
         getLogger().info("BlockLog loaded.");
     }
