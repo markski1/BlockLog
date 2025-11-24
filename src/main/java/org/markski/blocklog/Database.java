@@ -206,43 +206,7 @@ public class Database {
         return result;
     }
 
-    public static final class BlockLogEntry {
-        private final String playerName;
-        private final String blockType;
-        private final BlockActionType action;
-        private final long createdAt;
-        private final BlockActionCause cause;
-
-        public BlockLogEntry(String playerName,
-                             String blockType,
-                             BlockActionType action,
-                             long createdAt,
-                             BlockActionCause cause) {
-            this.playerName = playerName;
-            this.blockType = blockType;
-            this.action = action;
-            this.createdAt = createdAt;
-            this.cause = cause;
-        }
-
-        public String getPlayerName() {
-            return playerName;
-        }
-
-        public String getBlockType() {
-            return blockType;
-        }
-
-        public BlockActionType getAction() {
-            return action;
-        }
-
-        public long getCreatedAt() {
-            return createdAt;
-        }
-
-        public BlockActionCause getCause() {
-            return cause;
-        }
+    public record BlockLogEntry(String playerName, String blockType, BlockActionType action, long createdAt,
+                                BlockActionCause cause) {
     }
 }

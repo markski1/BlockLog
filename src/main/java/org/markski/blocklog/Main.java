@@ -3,11 +3,16 @@ package org.markski.blocklog;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.sql.SQLException;
+import java.util.Set;
+import java.util.UUID;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class Main extends JavaPlugin {
 
     private Database database;
+    private final Set<UUID> inspectingPlayers =
+            ConcurrentHashMap.newKeySet();
 
     @Override
     public void onEnable() {
@@ -43,19 +48,21 @@ public class Main extends JavaPlugin {
         getLogger().info("BlockLog unloaded.");
     }
 
-    @Override
-    public boolean onCommand(org.bukkit.command.CommandSender sender,
-                             org.bukkit.command.Command command,
-                             String label,
-                             String[] args) {
-        if (command.getName().equalsIgnoreCase("bkl")) {
-            sender.sendMessage("BlockLog is loaded.");
-            return true;
-        }
-        return false;
-    }
-
     public Database getDatabase() {
         return database;
+    }
+
+    public boolean isInspecting(UUID playerId) {
+        return inspectingPlayers.contains(playerId);
+    }
+
+    public boolean toggleInspect(UUID playerId) {
+        if (inspectingPlayers.contains(playerId)) {
+            inspectingPlayers.remove(playerId);
+            return false; // now disabled
+        } else {
+            inspectingPlayers.add(playerId);
+            return true; // now enabled
+        }
     }
 }
