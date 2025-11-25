@@ -6,6 +6,8 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.block.Action;
 
 import java.sql.SQLException;
 import java.time.Instant;
@@ -43,16 +45,39 @@ public class BlockActionListener implements Listener {
     @EventHandler
     public void onBlockPlace(BlockPlaceEvent event) {
         Player player = event.getPlayer();
-        Block block = event.getBlockPlaced();
+        Block placed = event.getBlockPlaced();
 
         if (plugin.isInspecting(player.getUniqueId())) {
             // If inspecting, don't let actions go through, just inspect the coords.
             event.setCancelled(true);
-            inspectBlock(player, block);
+            inspectBlock(player, placed);
             return;
         }
 
-        logAction(player, block, BlockActionType.PLACED, BlockActionCause.PLAYER);
+
+        logAction(player, placed, BlockActionType.PLACED, BlockActionCause.PLAYER);
+    }
+
+    @EventHandler
+    public void onPlayerInteract(PlayerInteractEvent event) {
+        Player player = event.getPlayer();
+
+        if (!plugin.isInspecting(player.getUniqueId())) {
+            return;
+        }
+
+        Action action = event.getAction();
+        if (action != Action.LEFT_CLICK_BLOCK && action != Action.RIGHT_CLICK_BLOCK) {
+            return;
+        }
+
+        Block clicked = event.getClickedBlock();
+        if (clicked == null) {
+            return;
+        }
+
+        // Inspect on click (no cancel)
+        inspectBlock(player, clicked);
     }
 
     private void inspectBlock(Player player, Block block) {
