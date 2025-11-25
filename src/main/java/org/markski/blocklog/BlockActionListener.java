@@ -54,7 +54,6 @@ public class BlockActionListener implements Listener {
             return;
         }
 
-
         logAction(player, placed, BlockActionType.PLACED, BlockActionCause.PLAYER);
     }
 
@@ -135,7 +134,6 @@ public class BlockActionListener implements Listener {
                            BlockActionCause cause) {
         var db = plugin.getDatabase();
         if (db == null || db.getConnection() == null) {
-            plugin.getLogger().warning("Database not available; skipping block action log.");
             return;
         }
 
@@ -148,19 +146,15 @@ public class BlockActionListener implements Listener {
         String blockType = block.getType().name();
         long now = System.currentTimeMillis();
 
-        try {
-            db.logBlockAction(
-                    playerUuid,
-                    playerName,
-                    worldName,
-                    x, y, z,
-                    blockType,
-                    action,
-                    now,
-                    cause
-            );
-        } catch (Exception e) {
-            plugin.getLogger().severe("Failed to log block action: " + e.getMessage());
-        }
+        db.enqueueBlockAction(
+            playerUuid,
+            playerName,
+            worldName,
+            x, y, z,
+            blockType,
+            action,
+            now,
+            cause
+        );
     }
 }

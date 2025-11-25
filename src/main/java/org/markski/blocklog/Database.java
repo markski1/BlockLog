@@ -1,6 +1,7 @@
 package org.markski.blocklog;
 
 import org.bukkit.plugin.Plugin;
+import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.sql.Connection;
@@ -11,40 +12,53 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class Database {
     private final Plugin plugin;
     private Connection connection;
+
+    private final Queue<PendingBlockAction> pendingActions = new ConcurrentLinkedQueue<>();
+    private BukkitTask flushTask;
+
+    // 1200 ticks seems to be 60 seconds.
+    private static final long FLUSH_INTERVAL_TICKS = 1200L;
+    private static final int MAX_QUEUE_SIZE = 50_000;
 
     public Database(Plugin plugin) {
         this.plugin = plugin;
     }
 
     public void open() throws SQLException {
-            if (!plugin.getDataFolder().exists()) {
-                boolean created = plugin.getDataFolder().mkdirs();
-                if (!created) {
-                    throw new SQLException("Could not create plugin data folder: " +
-                            plugin.getDataFolder().getAbsolutePath());
-                }
+        if (!plugin.getDataFolder().exists()) {
+            boolean created = plugin.getDataFolder().mkdirs();
+            if (!created) {
+                throw new SQLException("Could not create plugin data folder: " +
+                        plugin.getDataFolder().getAbsolutePath());
             }
-
-            File dbFile = new File(plugin.getDataFolder(), "blocklog.sqlite");
-            boolean existedBefore = dbFile.exists();
-
-            String url = "jdbc:sqlite:" + dbFile.getAbsolutePath();
-            connection = DriverManager.getConnection(url);
-
-            if (!existedBefore) {
-                plugin.getLogger().info("Created db: " + dbFile.getName());
-            } else {
-                plugin.getLogger().info("Using db: " + dbFile.getName());
-            }
-
-            createTables();
         }
 
+        File dbFile = new File(plugin.getDataFolder(), "blocklog.sqlite");
+        boolean existedBefore = dbFile.exists();
+
+        String url = "jdbc:sqlite:" + dbFile.getAbsolutePath();
+        connection = DriverManager.getConnection(url);
+
+        if (!existedBefore) {
+            plugin.getLogger().info("Created db: " + dbFile.getName());
+        } else {
+            plugin.getLogger().info("Using db: " + dbFile.getName());
+        }
+
+        createTables();
+        startAsyncFlushTask();
+    }
+
     public void close() {
+        // Try to flush everything before shutting down.
+        stopAsyncFlushTaskAndFlushNow();
+
         if (connection != null) {
             try {
                 connection.close();
@@ -100,7 +114,8 @@ public class Database {
         }
     }
 
-    public void logBlockAction(
+
+    public void enqueueBlockAction(
             String playerUuid,
             String playerName,
             String worldName,
@@ -111,7 +126,73 @@ public class Database {
             BlockActionType action,
             long createdAt,
             BlockActionCause cause
-    ) throws SQLException {
+    ) {
+        if (connection == null) {
+            return;
+        }
+
+        if (pendingActions.size() >= MAX_QUEUE_SIZE) {
+            plugin.getLogger().warning("BlockLog queue full, event dropped.");
+            return;
+        }
+
+        pendingActions.add(new PendingBlockAction(
+                playerUuid,
+                playerName,
+                worldName,
+                x, y, z,
+                blockType,
+                action,
+                createdAt,
+                cause
+        ));
+    }
+
+    private void startAsyncFlushTask() {
+        if (flushTask != null) {
+            return;
+        }
+
+        flushTask = plugin.getServer().getScheduler().runTaskTimerAsynchronously(
+                plugin,
+                this::flushPendingActionsSafe,
+                FLUSH_INTERVAL_TICKS,
+                FLUSH_INTERVAL_TICKS
+        );
+    }
+
+    private void stopAsyncFlushTaskAndFlushNow() {
+        if (flushTask != null) {
+            flushTask.cancel();
+            flushTask = null;
+        }
+        flushPendingActionsSafe();
+    }
+
+    private void flushPendingActionsSafe() {
+        try {
+            flushPendingActions();
+        } catch (Exception e) {
+            plugin.getLogger().severe("Error flushing block actions: " + e.getMessage());
+        }
+    }
+
+    private void flushPendingActions() throws SQLException {
+        if (connection == null) {
+            pendingActions.clear();
+            return;
+        }
+
+        List<PendingBlockAction> batch = new ArrayList<>();
+        PendingBlockAction action;
+        while ((action = pendingActions.poll()) != null) {
+            batch.add(action);
+        }
+
+        if (batch.isEmpty()) {
+            return;
+        }
+
         String sql = """
                 INSERT INTO block_actions (
                     player_uuid,
@@ -127,24 +208,51 @@ public class Database {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """;
 
+        boolean oldAutoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, playerUuid);
-            ps.setString(2, playerName);
-            ps.setString(3, worldName);
-            ps.setInt(4, x);
-            ps.setInt(5, y);
-            ps.setInt(6, z);
-            ps.setString(7, blockType);
-            ps.setInt(8, action.getCode());
-            ps.setLong(9, createdAt);
-            if (cause != null) {
-                ps.setInt(10, cause.getCode());
-            } else {
-                ps.setNull(10, java.sql.Types.INTEGER);
+            for (PendingBlockAction a : batch) {
+                ps.setString(1, a.playerUuid());
+                ps.setString(2, a.playerName());
+                ps.setString(3, a.worldName());
+                ps.setInt(4, a.x());
+                ps.setInt(5, a.y());
+                ps.setInt(6, a.z());
+                ps.setString(7, a.blockType());
+                ps.setInt(8, a.action().getCode());
+                ps.setLong(9, a.createdAt());
+                if (a.cause() != null) {
+                    ps.setInt(10, a.cause().getCode());
+                } else {
+                    ps.setNull(10, java.sql.Types.INTEGER);
+                }
+                ps.addBatch();
             }
-            ps.executeUpdate();
+
+            ps.executeBatch();
+            connection.commit();
+        } catch (SQLException e) {
+            connection.rollback();
+            plugin.getLogger().severe("Failed to flush block actions batch: " + e.getMessage());
+            throw e;
+        } finally {
+            connection.setAutoCommit(oldAutoCommit);
         }
     }
+
+    private record PendingBlockAction(
+            String playerUuid,
+            String playerName,
+            String worldName,
+            int x,
+            int y,
+            int z,
+            String blockType,
+            BlockActionType action,
+            long createdAt,
+            BlockActionCause cause
+    ) {}
 
     public List<BlockLogEntry> getRecentActionsAtBlock(
             String worldName,
