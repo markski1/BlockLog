@@ -90,42 +90,58 @@ public class BlockActionListener implements Listener {
         int x = block.getX();
         int y = block.getY();
         int z = block.getZ();
+        String playerName = player.getName(); // for logging if needed
+        var server = plugin.getServer();
 
-        try {
-            var entries = db.getRecentActionsAtBlock(worldName, x, y, z, INSPECT_MAX_RESULTS);
+        // Query db async so we don't block the main thread
+        server.getScheduler().runTaskAsynchronously(plugin, () -> {
+            var entries = java.util.Collections.<org.markski.blocklog.Database.BlockLogEntry>emptyList();
+            try {
+                entries = db.getRecentActionsAtBlock(worldName, x, y, z, INSPECT_MAX_RESULTS);
+            } catch (SQLException e) {
+                plugin.getLogger().severe("Failed to query block history for " +
+                        playerName + " at " + worldName + " (" + x + "," + y + "," + z + "): " +
+                        e.getMessage());
 
-            player.sendMessage("§e[Inspect] Block history at §7" + worldName +
-                    " §f(" + x + ", " + y + ", " + z + "):");
-
-            if (entries.isEmpty()) {
-                player.sendMessage("§7No logged actions for this block.");
+                // Must send messages at the main thread.
+                server.getScheduler().runTask(plugin, () ->
+                        player.sendMessage("§cFailed to query block history. See console.")
+                );
                 return;
             }
 
-            for (var entry : entries) {
-                String timeStr = timeFormatter.format(
-                        Instant.ofEpochMilli(entry.createdAt())
-                );
-                String actionStr = switch (entry.action()) {
-                    case PLACED -> "§aPLACED";
-                    case BROKEN -> "§cBROKEN";
-                    case INTERACTION -> "§bINTERACTED";
-                };
+            // Must send messages at the main thread.
+            var finalEntries = entries;
+            server.getScheduler().runTask(plugin, () -> {
+                player.sendMessage("§e[Inspect] Block history at §7" + worldName +
+                        " §f(" + x + ", " + y + ", " + z + "):");
 
-                String causeStr = entry.cause() != null
-                        ? entry.cause().name()
-                        : "UNKNOWN";
+                if (finalEntries.isEmpty()) {
+                    player.sendMessage("§7No logged actions for this block.");
+                    return;
+                }
 
-                player.sendMessage("§7[" + timeStr + "] " +
-                        "§b" + entry.playerName() + " §7" +
-                        actionStr + " §f" + entry.blockType() +
-                        " §8(" + causeStr + ")");
-            }
+                for (var entry : finalEntries) {
+                    String timeStr = timeFormatter.format(
+                            Instant.ofEpochMilli(entry.createdAt())
+                    );
+                    String actionStr = switch (entry.action()) {
+                        case PLACED -> "§aPLACED";
+                        case BROKEN -> "§cBROKEN";
+                        case INTERACTION -> "§bINTERACTED";
+                    };
 
-        } catch (SQLException e) {
-            plugin.getLogger().severe("Failed to query block history: " + e.getMessage());
-            player.sendMessage("§cFailed to query block history. See console.");
-        }
+                    String causeStr = entry.cause() != null
+                            ? entry.cause().name()
+                            : "UNKNOWN";
+
+                    player.sendMessage("§7[" + timeStr + "] " +
+                            "§b" + entry.playerName() + " §7" +
+                            actionStr + " §f" + entry.blockType() +
+                            " §8(" + causeStr + ")");
+                }
+            });
+        });
     }
 
     private void logAction(Player player,

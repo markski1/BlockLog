@@ -24,7 +24,7 @@ public class Database {
 
     // 1200 ticks seems to be 60 seconds.
     private static final long FLUSH_INTERVAL_TICKS = 1200L;
-    private static final int MAX_QUEUE_SIZE = 50_000;
+    private static final int MAX_QUEUE_SIZE = 50000;
 
     public Database(Plugin plugin) {
         this.plugin = plugin;
@@ -131,6 +131,7 @@ public class Database {
             return;
         }
 
+        // JetBrains says .size() is O(n). Carrying a counter could be easy enough. If it matters.
         if (pendingActions.size() >= MAX_QUEUE_SIZE) {
             plugin.getLogger().warning("BlockLog queue full, event dropped.");
             return;
