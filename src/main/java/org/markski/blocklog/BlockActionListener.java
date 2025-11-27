@@ -8,6 +8,8 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.block.Action;
+import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.block.BlockExplodeEvent;
 
 import java.sql.SQLException;
 import java.time.Instant;
@@ -39,7 +41,7 @@ public class BlockActionListener implements Listener {
             return;
         }
 
-        logAction(player, block, BlockActionType.BROKEN, BlockActionCause.PLAYER);
+        logAction(player, block, BlockActionType.BROKEN);
     }
 
     @EventHandler
@@ -54,7 +56,7 @@ public class BlockActionListener implements Listener {
             return;
         }
 
-        logAction(player, placed, BlockActionType.PLACED, BlockActionCause.PLAYER);
+        logAction(player, placed, BlockActionType.PLACED);
     }
 
     @EventHandler
@@ -79,6 +81,20 @@ public class BlockActionListener implements Listener {
         inspectBlock(player, clicked);
     }
 
+    @EventHandler
+    public void onEntityExplode(EntityExplodeEvent event) {
+        for (Block block : event.blockList()) {
+            logExplosion(block);
+        }
+    }
+
+    @EventHandler
+    public void onBlockExplode(BlockExplodeEvent event) {
+        for (Block block : event.blockList()) {
+            logExplosion(block);
+        }
+    }
+
     private void inspectBlock(Player player, Block block) {
         var db = plugin.getDatabase();
         if (db == null || db.getConnection() == null) {
@@ -90,7 +106,6 @@ public class BlockActionListener implements Listener {
         int x = block.getX();
         int y = block.getY();
         int z = block.getZ();
-        String playerName = player.getName(); // for logging if needed
         var server = plugin.getServer();
 
         // Query db async so we don't block the main thread
@@ -99,8 +114,7 @@ public class BlockActionListener implements Listener {
             try {
                 entries = db.getRecentActionsAtBlock(worldName, x, y, z, INSPECT_MAX_RESULTS);
             } catch (SQLException e) {
-                plugin.getLogger().severe("Failed to query block history for " +
-                        playerName + " at " + worldName + " (" + x + "," + y + "," + z + "): " +
+                plugin.getLogger().severe("Failed to query block history. - " +
                         e.getMessage());
 
                 // Must send messages at the main thread.
@@ -146,8 +160,7 @@ public class BlockActionListener implements Listener {
 
     private void logAction(Player player,
                            Block block,
-                           BlockActionType action,
-                           BlockActionCause cause) {
+                           BlockActionType action) {
         var db = plugin.getDatabase();
         if (db == null || db.getConnection() == null) {
             return;
@@ -163,14 +176,39 @@ public class BlockActionListener implements Listener {
         long now = System.currentTimeMillis();
 
         db.enqueueBlockAction(
-            playerUuid,
-            playerName,
-            worldName,
-            x, y, z,
-            blockType,
-            action,
-            now,
-            cause
+                playerUuid,
+                playerName,
+                worldName,
+                x, y, z,
+                blockType,
+                action,
+                now,
+                BlockActionCause.PLAYER
+        );
+    }
+
+    private void logExplosion(Block block) {
+        var db = plugin.getDatabase();
+        if (db == null || db.getConnection() == null) {
+            return;
+        }
+
+        String worldName = block.getWorld().getName();
+        int x = block.getX();
+        int y = block.getY();
+        int z = block.getZ();
+        String blockType = block.getType().name();
+        long now = System.currentTimeMillis();
+
+        db.enqueueBlockAction(
+                "00000000-0000-0000-0000-000000000000",
+                "[EXPLOSION]",
+                worldName,
+                x, y, z,
+                blockType,
+                BlockActionType.BROKEN,
+                now,
+                BlockActionCause.EXPLOSION
         );
     }
 }
