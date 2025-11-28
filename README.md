@@ -5,7 +5,6 @@ Lightweight block interaction logging plugin.
 ### Download
 
 A download is not yet available as to run this plugin in its current state is not yet advisable.
-
 You may build and run it yourself, no guarantee of support for the current sqlite schema in future versions is guaranteed.
 
 ### Motivation
@@ -18,16 +17,17 @@ To make a basic and lightweight plugin that doesn't implement an entire suite of
 
 ### Currently supported
 
-- Logging creation and destruction of blocks.
+- Logging creation and destruction of blocks, including explosions.
+- Logging of block interaction, ie. gates, chests.
 - Viewing them with the `/blk i` command.
+- Mostly-working rollback with `/blk rollback` command.
 
 ### TODO
 
-- Event buffering and graceful transaction recovery in case of SQLite errors.
-- Logging events of other types (container interactions, explosion, piston, mobs).
-- Rollback functionality, given a playername and a range.
+- Graceful transaction recovery in case of SQLite errors.
+- Logging events of other types (piston, mobs).
+- More detail in interaction with containers (ie. logging what is added/removed).
 - Test suite.
-- MAYBE: Logging of interactions to chests and other containers.
 
 ### Contribution
 

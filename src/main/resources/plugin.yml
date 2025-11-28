@@ -1,11 +1,11 @@
 name: BlockLog
 main: org.markski.blocklog.Main
-version: 0.1.0
+version: 0.2.0
 api-version: 1.20
 description: A lightweight block interaction logging plugin.
 authors: [ "Markski" ]
 
 commands:
   bkl:
-    description: Shows info about the block you're looking at.
+    description: All BlockLog related commands.
     usage: /bkl
