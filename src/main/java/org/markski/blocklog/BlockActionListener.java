@@ -22,12 +22,8 @@ import java.time.format.DateTimeFormatter;
 
 public class BlockActionListener implements Listener {
 
-    private static final int INSPECT_MAX_RESULTS = 10;
-
     private final Main plugin;
-    private final DateTimeFormatter timeFormatter =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
-                    .withZone(ZoneId.systemDefault());
+    private final DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
 
     public BlockActionListener(Main plugin) {
         this.plugin = plugin;
@@ -73,18 +69,15 @@ public class BlockActionListener implements Listener {
         }
 
         Block clicked = event.getClickedBlock();
-        if (clicked == null) {
-            return;
-        }
+        if (clicked != null) {
+            if (plugin.isInspecting(player.getUniqueId())) {
+                inspectBlock(player, clicked);
+                return;
+            }
 
-        if (plugin.isInspecting(player.getUniqueId())) {
-            // Inspect on click (no cancel)
-            inspectBlock(player, clicked);
-            return;
-        }
-
-        if (action == Action.RIGHT_CLICK_BLOCK && isInteractiveBlock(clicked)) {
-            logAction(player, clicked, BlockActionType.INTERACTION);
+            if (action == Action.RIGHT_CLICK_BLOCK && isInteractiveBlock(clicked)) {
+                logAction(player, clicked, BlockActionType.INTERACTION);
+            }
         }
     }
 
@@ -119,12 +112,10 @@ public class BlockActionListener implements Listener {
         server.getScheduler().runTaskAsynchronously(plugin, () -> {
             var entries = java.util.Collections.<org.markski.blocklog.Database.BlockLogEntry>emptyList();
             try {
-                entries = db.getRecentActionsAtBlock(worldName, x, y, z, INSPECT_MAX_RESULTS);
+                entries = db.getRecentActionsAtBlock(worldName, x, y, z, 10);
             } catch (SQLException e) {
-                plugin.getLogger().severe("Failed to query block history. - " +
-                        e.getMessage());
+                plugin.getLogger().severe("Failed to query block history. - " + e.getMessage());
 
-                // Must send messages at the main thread.
                 server.getScheduler().runTask(plugin, () ->
                         player.sendMessage("§cFailed to query block history. See console.")
                 );
@@ -134,8 +125,7 @@ public class BlockActionListener implements Listener {
             // Must send messages at the main thread.
             var finalEntries = entries;
             server.getScheduler().runTask(plugin, () -> {
-                player.sendMessage("§e[Inspect] Block history at §7" + worldName +
-                        " §f(" + x + ", " + y + ", " + z + "):");
+                player.sendMessage("§e[History] §7" + "§f(" + x + ", " + y + ", " + z + "):");
 
                 if (finalEntries.isEmpty()) {
                     player.sendMessage("§7No logged actions for this block.");
@@ -165,9 +155,7 @@ public class BlockActionListener implements Listener {
         });
     }
 
-    private void logAction(Player player,
-                           Block block,
-                           BlockActionType action) {
+    private void logAction(Player player, Block block, BlockActionType action) {
         var db = plugin.getDatabase();
         if (db == null || db.getConnection() == null) {
             return;
@@ -223,9 +211,7 @@ public class BlockActionListener implements Listener {
         Material type = block.getType();
 
         // doors and gates of any type
-        if (Tag.DOORS.isTagged(type)
-                || Tag.TRAPDOORS.isTagged(type)
-                || Tag.FENCE_GATES.isTagged(type)) {
+        if (Tag.DOORS.isTagged(type) || Tag.TRAPDOORS.isTagged(type) || Tag.FENCE_GATES.isTagged(type)) {
             return true;
         }
 

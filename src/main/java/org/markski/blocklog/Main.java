@@ -24,7 +24,6 @@ public class Main extends JavaPlugin {
             getLogger().info("Database initialized.");
         } catch (SQLException e) {
             getLogger().severe("Failed to initialize database: " + e.getMessage());
-            // Nothing to do without a database, disable.
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
@@ -59,10 +58,10 @@ public class Main extends JavaPlugin {
     public boolean toggleInspect(UUID playerId) {
         if (inspectingPlayers.contains(playerId)) {
             inspectingPlayers.remove(playerId);
-            return false; // now disabled
+            return false;
         } else {
             inspectingPlayers.add(playerId);
-            return true; // now enabled
+            return true;
         }
     }
 }

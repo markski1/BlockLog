@@ -74,6 +74,10 @@ public class Database {
         return connection;
     }
 
+    public void flushPendingActionsNow() {
+        flushPendingActionsSafe();
+    }
+
     private void createTables() throws SQLException {
         String sql = """
                     CREATE TABLE IF NOT EXISTS block_actions (
@@ -255,13 +259,7 @@ public class Database {
             BlockActionCause cause
     ) {}
 
-    public List<BlockLogEntry> getRecentActionsAtBlock(
-            String worldName,
-            int x,
-            int y,
-            int z,
-            int limit
-    ) throws SQLException {
+    public List<BlockLogEntry> getRecentActionsAtBlock(String worldName, int x, int y, int z, int limit) throws SQLException {
         String sql = """
                 SELECT player_name,
                        block_type,
@@ -315,7 +313,74 @@ public class Database {
         return result;
     }
 
-    public record BlockLogEntry(String playerName, String blockType, BlockActionType action, long createdAt,
-                                BlockActionCause cause) {
+    public List<RollbackEntry> getActionsForRollback(
+            String playerName,
+            String worldName,
+            long fromTime,
+            int minX,
+            int maxX,
+            int minY,
+            int maxY,
+            int minZ,
+            int maxZ
+    ) throws SQLException {
+        String sql = """
+                SELECT x,
+                       y,
+                       z,
+                       block_type,
+                       action,
+                       created_at
+                FROM block_actions
+                WHERE world = ?
+                  AND player_name = ?
+                  AND created_at >= ?
+                  AND x BETWEEN ? AND ?
+                  AND y BETWEEN ? AND ?
+                  AND z BETWEEN ? AND ?
+                  AND action IN ("PLACED", "BROKEN")
+                ORDER BY created_at ASC;
+                """;
+
+        List<RollbackEntry> result = new ArrayList<>();
+
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, worldName);
+            ps.setString(2, playerName);
+            ps.setLong(3, fromTime);
+            ps.setInt(4, minX);
+            ps.setInt(5, maxX);
+            ps.setInt(6, minY);
+            ps.setInt(7, maxY);
+            ps.setInt(8, minZ);
+            ps.setInt(9, maxZ);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int x = rs.getInt("x");
+                    int y = rs.getInt("y");
+                    int z = rs.getInt("z");
+                    String blockType = rs.getString("block_type");
+                    int actionCode = rs.getInt("action");
+                    long createdAt = rs.getLong("created_at");
+
+                    BlockActionType action = BlockActionType.fromCode(actionCode);
+
+                    result.add(new RollbackEntry(
+                            x,
+                            y,
+                            z,
+                            blockType,
+                            action,
+                            createdAt
+                    ));
+                }
+            }
+        }
+
+        return result;
     }
+
+    public record RollbackEntry(int x, int y, int z, String blockType, BlockActionType action, long createdAt) {}
+    public record BlockLogEntry(String playerName, String blockType, BlockActionType action, long createdAt, BlockActionCause cause) {}
 }
