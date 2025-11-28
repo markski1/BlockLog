@@ -8,6 +8,10 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.block.Action;
+import org.bukkit.Material;
+import org.bukkit.Tag;
+import org.bukkit.block.BlockState;
+import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
 
@@ -62,12 +66,8 @@ public class BlockActionListener implements Listener {
     @EventHandler
     public void onPlayerInteract(PlayerInteractEvent event) {
         Player player = event.getPlayer();
-
-        if (!plugin.isInspecting(player.getUniqueId())) {
-            return;
-        }
-
         Action action = event.getAction();
+
         if (action != Action.LEFT_CLICK_BLOCK && action != Action.RIGHT_CLICK_BLOCK) {
             return;
         }
@@ -77,8 +77,15 @@ public class BlockActionListener implements Listener {
             return;
         }
 
-        // Inspect on click (no cancel)
-        inspectBlock(player, clicked);
+        if (plugin.isInspecting(player.getUniqueId())) {
+            // Inspect on click (no cancel)
+            inspectBlock(player, clicked);
+            return;
+        }
+
+        if (action == Action.RIGHT_CLICK_BLOCK && isInteractiveBlock(clicked)) {
+            logAction(player, clicked, BlockActionType.INTERACTION);
+        }
     }
 
     @EventHandler
@@ -210,5 +217,39 @@ public class BlockActionListener implements Listener {
                 now,
                 BlockActionCause.EXPLOSION
         );
+    }
+
+    private boolean isInteractiveBlock(Block block) {
+        Material type = block.getType();
+
+        // doors and gates of any type
+        if (Tag.DOORS.isTagged(type)
+                || Tag.TRAPDOORS.isTagged(type)
+                || Tag.FENCE_GATES.isTagged(type)) {
+            return true;
+        }
+
+        // stuff with inventories
+        BlockState state = block.getState();
+        if (state instanceof InventoryHolder) {
+            return true;
+        }
+
+        // buttons
+        return switch (type) {
+            case LEVER,
+                 STONE_BUTTON,
+                 OAK_BUTTON,
+                 SPRUCE_BUTTON,
+                 BIRCH_BUTTON,
+                 JUNGLE_BUTTON,
+                 ACACIA_BUTTON,
+                 DARK_OAK_BUTTON,
+                 CRIMSON_BUTTON,
+                 WARPED_BUTTON,
+                 POLISHED_BLACKSTONE_BUTTON ->
+                    true;
+            default -> false;
+        };
     }
 }
