@@ -23,7 +23,7 @@ public class Database {
     private BukkitTask flushTask;
 
     // 1200 ticks seems to be 60 seconds.
-    private static final long FLUSH_INTERVAL_TICKS = 1200L;
+    private static final long FLUSH_INTERVAL_TICKS = 500L;
     private static final int MAX_QUEUE_SIZE = 50000;
 
     public Database(Plugin plugin) {

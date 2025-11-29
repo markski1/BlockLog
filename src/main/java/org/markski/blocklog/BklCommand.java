@@ -41,6 +41,12 @@ public class BklCommand implements CommandExecutor {
                 return true;
             }
 
+            // Just to ensure the "latter" actions are in there, flush it all to db.
+            // "Real" solution would be for inspect to check the db AND also the flush queue, but I don't like
+            // how that might affect dev(me) UX as the plugin potentially gets more complex.
+            Database db = plugin.getDatabase();
+            db.flushPendingActionsNow();
+
             boolean nowInspecting = plugin.toggleInspect(player.getUniqueId());
             if (nowInspecting) {
                 player.sendMessage("§aBlockLog inspect mode §aENABLED§f. Hit or place blocks to inspect them.");
