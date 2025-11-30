@@ -22,7 +22,7 @@ public class Database {
     private final Queue<PendingBlockAction> pendingActions = new ConcurrentLinkedQueue<>();
     private BukkitTask flushTask;
 
-    // 1200 ticks seems to be 60 seconds.
+    // 500 ticks seems to be a little under 30 seconds.
     private static final long FLUSH_INTERVAL_TICKS = 500L;
     private static final int MAX_QUEUE_SIZE = 50000;
 
@@ -239,6 +239,13 @@ public class Database {
             connection.commit();
         } catch (SQLException e) {
             connection.rollback();
+
+            // If we're here, it's likely an error specific to this transaction.
+            // Maybe the machine can't keep up or some jdbc driver fluke.
+            // Whatever the case, restore pendingActions. I'd rather hit MAX_QUEUE_SIZE as the worst case scenario.
+            pendingActions.addAll(batch);
+
+
             plugin.getLogger().severe("Failed to flush block actions batch: " + e.getMessage());
             throw e;
         } finally {
