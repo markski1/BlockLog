@@ -13,6 +13,7 @@ import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class Database {
@@ -80,8 +81,8 @@ public class Database {
 
     private void createTables() throws SQLException {
         String sql = """
-                    CREATE TABLE IF NOT EXISTS block_actions (
-                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    CREATE TABLE IF NOT EXISTS events (
+                        id           TEXT PRIMARY KEY NOT NULL,
                         player_uuid  TEXT    NOT NULL,
                         player_name  TEXT    NOT NULL,
                         world        TEXT    NOT NULL,
@@ -99,20 +100,20 @@ public class Database {
             stmt.execute(sql);
 
             sql = """
-                    CREATE INDEX IF NOT EXISTS idx_block_actions_world_xyz
-                    ON block_actions (world, x, y, z);
+                    CREATE INDEX IF NOT EXISTS idx_events_world_xyz
+                    ON events (world, x, y, z);
                     """;
             stmt.execute(sql);
 
             sql = """
-                    CREATE INDEX IF NOT EXISTS idx_block_actions_player_time
-                    ON block_actions (player_uuid, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_events_player_time
+                    ON events (player_uuid, created_at);
                     """;
             stmt.execute(sql);
 
             sql = """
-                    CREATE INDEX IF NOT EXISTS idx_block_actions_created_at
-                    ON block_actions (created_at);
+                    CREATE INDEX IF NOT EXISTS idx_events_created_at
+                    ON events (created_at);
                     """;
             stmt.execute(sql);
         }
@@ -141,7 +142,10 @@ public class Database {
             return;
         }
 
+        UUID uuid = UUID.randomUUID();
+
         pendingActions.add(new PendingBlockAction(
+                uuid.toString(),
                 playerUuid,
                 playerName,
                 worldName,
@@ -199,7 +203,8 @@ public class Database {
         }
 
         String sql = """
-                INSERT INTO block_actions (
+                INSERT INTO events (
+                    id,
                     player_uuid,
                     player_name,
                     world,
@@ -210,7 +215,7 @@ public class Database {
                     action,
                     created_at,
                     cause
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """;
 
         boolean oldAutoCommit = connection.getAutoCommit();
@@ -218,19 +223,20 @@ public class Database {
 
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             for (PendingBlockAction a : batch) {
-                ps.setString(1, a.playerUuid());
-                ps.setString(2, a.playerName());
-                ps.setString(3, a.worldName());
-                ps.setInt(4, a.x());
-                ps.setInt(5, a.y());
-                ps.setInt(6, a.z());
-                ps.setString(7, a.blockType());
-                ps.setInt(8, a.action().getCode());
-                ps.setLong(9, a.createdAt());
+                ps.setString(1, a.id());
+                ps.setString(2, a.playerUuid());
+                ps.setString(3, a.playerName());
+                ps.setString(4, a.worldName());
+                ps.setInt(5, a.x());
+                ps.setInt(6, a.y());
+                ps.setInt(7, a.z());
+                ps.setString(8, a.blockType());
+                ps.setInt(9, a.action().getCode());
+                ps.setLong(10, a.createdAt());
                 if (a.cause() != null) {
-                    ps.setInt(10, a.cause().getCode());
+                    ps.setInt(11, a.cause().getCode());
                 } else {
-                    ps.setNull(10, java.sql.Types.INTEGER);
+                    ps.setNull(11, java.sql.Types.INTEGER);
                 }
                 ps.addBatch();
             }
@@ -245,7 +251,6 @@ public class Database {
             // Whatever the case, restore pendingActions. I'd rather hit MAX_QUEUE_SIZE as the worst case scenario.
             pendingActions.addAll(batch);
 
-
             plugin.getLogger().severe("Failed to flush block actions batch: " + e.getMessage());
             throw e;
         } finally {
@@ -254,6 +259,7 @@ public class Database {
     }
 
     private record PendingBlockAction(
+            String id,
             String playerUuid,
             String playerName,
             String worldName,
