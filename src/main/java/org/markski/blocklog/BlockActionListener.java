@@ -1,29 +1,36 @@
 package org.markski.blocklog;
 
+import org.bukkit.Material;
+import org.bukkit.Tag;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
-import org.bukkit.event.block.BlockBreakEvent;
-import org.bukkit.event.block.BlockPlaceEvent;
-import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.block.Action;
-import org.bukkit.Material;
-import org.bukkit.Tag;
-import org.bukkit.block.BlockState;
-import org.bukkit.inventory.InventoryHolder;
-import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.inventory.ItemStack;
 
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
 
 public class BlockActionListener implements Listener {
 
     private final Main plugin;
     private final DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
+
+    private final Map<UUID, OpenContainerSession> openContainers = new HashMap<>();
 
     public BlockActionListener(Main plugin) {
         this.plugin = plugin;
@@ -76,8 +83,77 @@ public class BlockActionListener implements Listener {
             }
 
             if (action == Action.RIGHT_CLICK_BLOCK && isInteractiveBlock(clicked)) {
-                logAction(player, clicked, BlockActionType.INTERACTION);
+                String eventId = logAction(player, clicked, BlockActionType.INTERACTION);
+
+                // if it's a container, associate following inventory changes with this open-event UUID.
+                BlockState state = clicked.getState();
+                if (state instanceof InventoryHolder holder && eventId != null) {
+                    Map<Material, Integer> snapshot = countItems(holder.getInventory().getContents());
+
+                    openContainers.put(
+                            player.getUniqueId(),
+                            new OpenContainerSession(
+                                    eventId,
+                                    clicked.getWorld().getName(),
+                                    clicked.getX(),
+                                    clicked.getY(),
+                                    clicked.getZ(),
+                                    snapshot
+                            )
+                    );
+                }
             }
+        }
+    }
+
+    @EventHandler
+    public void onInventoryClose(InventoryCloseEvent event) {
+        if (!(event.getPlayer() instanceof Player player)) {
+            return;
+        }
+
+        OpenContainerSession session = openContainers.remove(player.getUniqueId());
+        if (session == null) {
+            return;
+        }
+
+        // diff snapshot against final container contents.
+        Map<Material, Integer> after = countItems(event.getView().getTopInventory().getContents());
+
+        // figure out deltas.
+        Map<Material, Integer> deltas = new HashMap<>();
+        for (var e : session.snapshot().entrySet()) {
+            deltas.put(e.getKey(), -e.getValue());
+        }
+        for (var e : after.entrySet()) {
+            deltas.merge(e.getKey(), e.getValue(), Integer::sum);
+        }
+
+        var db = plugin.getDatabase();
+        if (db == null || db.getConnection() == null) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        String playerUuid = player.getUniqueId().toString();
+        String playerName = player.getName();
+
+        for (var entry : deltas.entrySet()) {
+            int delta = entry.getValue();
+            if (delta == 0) {
+                continue;
+            }
+
+            db.enqueueContainerTransaction(
+                    session.eventId(),
+                    playerUuid,
+                    playerName,
+                    session.worldName(),
+                    session.x(), session.y(), session.z(),
+                    entry.getKey().name(),
+                    delta,
+                    now
+            );
         }
     }
 
@@ -125,7 +201,7 @@ public class BlockActionListener implements Listener {
             // Must send messages at the main thread.
             var finalEntries = entries;
             server.getScheduler().runTask(plugin, () -> {
-                player.sendMessage("§e[History] §7" + "§f(" + x + ", " + y + ", " + z + "):");
+                player.sendMessage("§e[History] §7" + "§f(" + x + ", " + y + ", " + y + ", " + z + "):");
 
                 if (finalEntries.isEmpty()) {
                     player.sendMessage("§7No logged actions for this block.");
@@ -155,10 +231,10 @@ public class BlockActionListener implements Listener {
         });
     }
 
-    private void logAction(Player player, Block block, BlockActionType action) {
+    private String logAction(Player player, Block block, BlockActionType action) {
         var db = plugin.getDatabase();
         if (db == null || db.getConnection() == null) {
-            return;
+            return null;
         }
 
         String playerUuid = player.getUniqueId().toString();
@@ -170,7 +246,7 @@ public class BlockActionListener implements Listener {
         String blockType = block.getType().name();
         long now = System.currentTimeMillis();
 
-        db.enqueueBlockAction(
+        return db.enqueueBlockAction(
                 playerUuid,
                 playerName,
                 worldName,
@@ -238,4 +314,33 @@ public class BlockActionListener implements Listener {
             default -> false;
         };
     }
+
+    private static Map<Material, Integer> countItems(ItemStack[] contents) {
+        Map<Material, Integer> counts = new HashMap<>();
+        if (contents == null) {
+            return counts;
+        }
+
+        for (ItemStack stack : contents) {
+            if (stack == null) {
+                continue;
+            }
+            Material type = stack.getType();
+            if (type == Material.AIR) {
+                continue;
+            }
+            counts.merge(type, stack.getAmount(), Integer::sum);
+        }
+
+        return counts;
+    }
+
+    private record OpenContainerSession(
+            String eventId,
+            String worldName,
+            int x,
+            int y,
+            int z,
+            Map<Material, Integer> snapshot
+    ) {}
 }
