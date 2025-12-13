@@ -21,6 +21,7 @@ public class Database {
     private Connection connection;
 
     private final Queue<PendingBlockAction> pendingActions = new ConcurrentLinkedQueue<>();
+    private final Queue<PendingContainerTransaction> pendingContainerTransactions = new ConcurrentLinkedQueue<>();
     private BukkitTask flushTask;
 
     // 500 ticks seems to be a little under 30 seconds.
@@ -116,11 +117,40 @@ public class Database {
                     ON events (created_at);
                     """;
             stmt.execute(sql);
+
+            sql = """
+                    CREATE TABLE IF NOT EXISTS container_transactions (
+                        id          TEXT PRIMARY KEY NOT NULL,
+                        event_id    TEXT    NOT NULL,
+                        player_uuid TEXT    NOT NULL,
+                        player_name TEXT    NOT NULL,
+                        world       TEXT    NOT NULL,
+                        x           INTEGER NOT NULL,
+                        y           INTEGER NOT NULL,
+                        z           INTEGER NOT NULL,
+                        item_type   TEXT    NOT NULL,
+                        delta       INTEGER NOT NULL,
+                        created_at  INTEGER NOT NULL,
+                        FOREIGN KEY (event_id) REFERENCES events(id)
+                    );
+                    """;
+            stmt.execute(sql);
+
+            sql = """
+                    CREATE INDEX IF NOT EXISTS idx_container_transactions_event
+                    ON container_transactions (event_id);
+                    """;
+            stmt.execute(sql);
+
+            sql = """
+                    CREATE INDEX IF NOT EXISTS idx_container_transactions_world_xyz_time
+                    ON container_transactions (world, x, y, z, created_at);
+                    """;
+            stmt.execute(sql);
         }
     }
 
-
-    public void enqueueBlockAction(
+    public String enqueueBlockAction(
             String playerUuid,
             String playerName,
             String worldName,
@@ -133,13 +163,13 @@ public class Database {
             BlockActionCause cause
     ) {
         if (connection == null) {
-            return;
+            return null;
         }
 
         // JetBrains says .size() is O(n). Carrying a counter could be easy enough. If it matters.
         if (pendingActions.size() >= MAX_QUEUE_SIZE) {
             plugin.getLogger().warning("BlockLog queue full, event dropped.");
-            return;
+            return null;
         }
 
         UUID uuid = UUID.randomUUID();
@@ -154,6 +184,49 @@ public class Database {
                 action,
                 createdAt,
                 cause
+        ));
+
+        return uuid.toString();
+    }
+
+    public void enqueueContainerTransaction(
+            String eventId,
+            String playerUuid,
+            String playerName,
+            String worldName,
+            int x,
+            int y,
+            int z,
+            String itemType,
+            int delta,
+            long createdAt
+    ) {
+        if (connection == null) {
+            return;
+        }
+        if (eventId == null) {
+            return;
+        }
+        if (delta == 0) {
+            return;
+        }
+
+        if (pendingContainerTransactions.size() >= MAX_QUEUE_SIZE) {
+            plugin.getLogger().warning("BlockLog queue full, container transaction dropped.");
+            return;
+        }
+
+        UUID id = UUID.randomUUID();
+        pendingContainerTransactions.add(new PendingContainerTransaction(
+                id.toString(),
+                eventId,
+                playerUuid,
+                playerName,
+                worldName,
+                x, y, z,
+                itemType,
+                delta,
+                createdAt
         ));
     }
 
@@ -189,16 +262,23 @@ public class Database {
     private void flushPendingActions() throws SQLException {
         if (connection == null) {
             pendingActions.clear();
+            pendingContainerTransactions.clear();
             return;
         }
 
-        List<PendingBlockAction> batch = new ArrayList<>();
+        List<PendingBlockAction> eventsBatch = new ArrayList<>();
         PendingBlockAction action;
         while ((action = pendingActions.poll()) != null) {
-            batch.add(action);
+            eventsBatch.add(action);
         }
 
-        if (batch.isEmpty()) {
+        List<PendingContainerTransaction> txBatch = new ArrayList<>();
+        PendingContainerTransaction tx;
+        while ((tx = pendingContainerTransactions.poll()) != null) {
+            txBatch.add(tx);
+        }
+
+        if (eventsBatch.isEmpty() && txBatch.isEmpty()) {
             return;
         }
 
@@ -218,40 +298,78 @@ public class Database {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """;
 
+        String txSql = """
+                INSERT INTO container_transactions (
+                    id,
+                    event_id,
+                    player_uuid,
+                    player_name,
+                    world,
+                    x,
+                    y,
+                    z,
+                    item_type,
+                    delta,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """;
+
         boolean oldAutoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
 
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            for (PendingBlockAction a : batch) {
-                ps.setString(1, a.id());
-                ps.setString(2, a.playerUuid());
-                ps.setString(3, a.playerName());
-                ps.setString(4, a.worldName());
-                ps.setInt(5, a.x());
-                ps.setInt(6, a.y());
-                ps.setInt(7, a.z());
-                ps.setString(8, a.blockType());
-                ps.setInt(9, a.action().getCode());
-                ps.setLong(10, a.createdAt());
+        try (PreparedStatement eventsPs = connection.prepareStatement(sql);
+             PreparedStatement txPs = connection.prepareStatement(txSql)) {
+
+            for (PendingBlockAction a : eventsBatch) {
+                eventsPs.setString(1, a.id());
+                eventsPs.setString(2, a.playerUuid());
+                eventsPs.setString(3, a.playerName());
+                eventsPs.setString(4, a.worldName());
+                eventsPs.setInt(5, a.x());
+                eventsPs.setInt(6, a.y());
+                eventsPs.setInt(7, a.z());
+                eventsPs.setString(8, a.blockType());
+                eventsPs.setInt(9, a.action().getCode());
+                eventsPs.setLong(10, a.createdAt());
                 if (a.cause() != null) {
-                    ps.setInt(11, a.cause().getCode());
+                    eventsPs.setInt(11, a.cause().getCode());
                 } else {
-                    ps.setNull(11, java.sql.Types.INTEGER);
+                    eventsPs.setNull(11, java.sql.Types.INTEGER);
                 }
-                ps.addBatch();
+                eventsPs.addBatch();
             }
 
-            ps.executeBatch();
+            for (PendingContainerTransaction t : txBatch) {
+                txPs.setString(1, t.id());
+                txPs.setString(2, t.eventId());
+                txPs.setString(3, t.playerUuid());
+                txPs.setString(4, t.playerName());
+                txPs.setString(5, t.worldName());
+                txPs.setInt(6, t.x());
+                txPs.setInt(7, t.y());
+                txPs.setInt(8, t.z());
+                txPs.setString(9, t.itemType());
+                txPs.setInt(10, t.delta());
+                txPs.setLong(11, t.createdAt());
+                txPs.addBatch();
+            }
+
+            if (!eventsBatch.isEmpty()) {
+                eventsPs.executeBatch();
+            }
+            if (!txBatch.isEmpty()) {
+                txPs.executeBatch();
+            }
+
             connection.commit();
         } catch (SQLException e) {
             connection.rollback();
 
-            // If we're here, it's likely an error specific to this transaction.
-            // Maybe the machine can't keep up or some jdbc driver fluke.
-            // Whatever the case, restore pendingActions. I'd rather hit MAX_QUEUE_SIZE as the worst case scenario.
-            pendingActions.addAll(batch);
+            // Restore batches so we don't silently lose data.
+            pendingActions.addAll(eventsBatch);
+            pendingContainerTransactions.addAll(txBatch);
 
-            plugin.getLogger().severe("Failed to flush block actions batch: " + e.getMessage());
+            plugin.getLogger().severe("Failed to flush batch: " + e.getMessage());
             throw e;
         } finally {
             connection.setAutoCommit(oldAutoCommit);
@@ -270,6 +388,20 @@ public class Database {
             BlockActionType action,
             long createdAt,
             BlockActionCause cause
+    ) {}
+
+    private record PendingContainerTransaction(
+            String id,
+            String eventId,
+            String playerUuid,
+            String playerName,
+            String worldName,
+            int x,
+            int y,
+            int z,
+            String itemType,
+            int delta,
+            long createdAt
     ) {}
 
     public List<BlockLogEntry> getRecentActionsAtBlock(String worldName, int x, int y, int z, int limit) throws SQLException {
