@@ -30,14 +30,19 @@ public class BklCommand implements CommandExecutor {
             return false;
         }
 
+        if (!(sender instanceof Player executor)) {
+            sender.sendMessage("This command can only be used by a player.");
+            return true;
+        }
+
         if (args.length == 0) {
             sender.sendMessage("BlockLog is loaded.");
             return true;
         }
 
         if (args[0].equalsIgnoreCase("i")) {
-            if (!(sender instanceof Player player)) {
-                sender.sendMessage("This subcommand can only be used by a player.");
+            if (!sender.hasPermission("blocklog.inspect")) {
+                sender.sendMessage("§cYou don't have permission to use /bkl i.");
                 return true;
             }
 
@@ -47,18 +52,18 @@ public class BklCommand implements CommandExecutor {
             Database db = plugin.getDatabase();
             db.flushPendingActionsNow();
 
-            boolean nowInspecting = plugin.toggleInspect(player.getUniqueId());
+            boolean nowInspecting = plugin.toggleInspect(executor.getUniqueId());
             if (nowInspecting) {
-                player.sendMessage("§aBlockLog inspect mode §aENABLED§f. Hit or place blocks to inspect them.");
+                executor.sendMessage("§aBlockLog inspect mode §aenabled§f. Hit or place blocks to inspect them.");
             } else {
-                player.sendMessage("§cBlockLog inspect mode §cDISABLED§f.");
+                executor.sendMessage("§cBlockLog inspect mode §cdisabled§f.");
             }
             return true;
         }
 
         if (args[0].equalsIgnoreCase("rollback")) {
-            if (!(sender instanceof Player executor)) {
-                sender.sendMessage("This subcommand can only be used by a player.");
+            if (!sender.hasPermission("blocklog.rollback")) {
+                sender.sendMessage("§cYou don't have permission to use /bkl rollback.");
                 return true;
             }
 
@@ -105,13 +110,9 @@ public class BklCommand implements CommandExecutor {
             int minZ = cz - radius;
             int maxZ = cz + radius;
 
-            sender.sendMessage(
-                    "§eStarting rollback for §b" + targetPlayerName +
-                    "§e, last §b" + hours + "§eh, radius §b" + radius + "§e..."
-            );
+            sender.sendMessage("§eStarting rollback for §b" + targetPlayerName + "§e, last §b" + hours + "§eh, radius §b" + radius + "§e...");
 
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                // because we'll pick the actions up from the database, we want to be sure everything's been flushed and committed.
                 db.flushPendingActionsNow();
 
                 List<Database.RollbackEntry> entries;
@@ -135,9 +136,6 @@ public class BklCommand implements CommandExecutor {
                     return;
                 }
 
-                // block restoration must be done in the main task.
-                // all this shit could cause hangs, probably. it might be best to move most of this logic out here,
-                // put the actual block changes to be done in a collection, and only call the main thread to run those.
                 Bukkit.getScheduler().runTask(plugin, () -> {
                     int affected = 0;
                     int skipped = 0;
@@ -152,7 +150,6 @@ public class BklCommand implements CommandExecutor {
                         int dy = y - cy;
                         int dz = z - cz;
 
-                        // spherical radius check
                         if (dx * dx + dy * dy + dz * dz > radiusSq) {
                             continue;
                         }
@@ -167,7 +164,6 @@ public class BklCommand implements CommandExecutor {
                         }
 
                         if (e.action() == BlockActionType.PLACED) {
-                            // only remove blocks if they're the type logged, otherwise someone else did it
                             if (current == logged) {
                                 block.setType(Material.AIR, false);
                                 affected++;
@@ -175,9 +171,6 @@ public class BklCommand implements CommandExecutor {
                                 skipped++;
                             }
                         } else if (e.action() == BlockActionType.BROKEN) {
-                            // only restore blocks where there's air, otherwise it might grief.
-                            // minecraft wiki at https://minecraft.wiki/w/Air mentions 'cave air' and 'void air'.
-                            // not sure if it matters.
                             if (current == Material.AIR) {
                                 block.setType(logged, false);
                                 affected++;
@@ -187,10 +180,7 @@ public class BklCommand implements CommandExecutor {
                         }
                     }
 
-                    sender.sendMessage(
-                            "§aRollback complete. §b" + affected +
-                            "§a blocks changed, §7" + skipped + " skipped."
-                    );
+                    sender.sendMessage("§aRollback complete. §b" + affected + "§a blocks changed, §7" + skipped + " skipped.");
                 });
             });
 
