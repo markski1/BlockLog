@@ -4,7 +4,8 @@ Lightweight block interaction logging plugin.
 
 ### Download
 
-A download is not yet available as to run this plugin in its current state is not yet advisable.
+A download is not yet available as the plugin remains in experimental state.
+
 You may build and run it yourself, no guarantee of support for the current sqlite schema in future versions is guaranteed.
 
 ### Motivation
@@ -13,29 +14,49 @@ The standard block logging plugins have caused me grief perf-wise and with stran
 
 ### Objectives
 
-To make a basic and lightweight plugin that doesn't implement an entire suite of stuff undesired.
+To make a simple and lightweight plugin that doesn't implement an entire suite of stuff undesired.
 
-### Currently supported
+### Features
 
-- Logging creation and destruction of blocks, including explosions.
-- Logging of block interaction, ie. gates, chests.
-- Viewing them with the `/blk i` command.
-- Mostly-working rollback with `/blk rollback` command.
+- Logs creation and destruction of blocks, including explosions.
+- Logs block transactions.
+- Logging of block interaction, ie. opening and closing gates, chests.
+- Inspection command with `/blk i`.
+- Rollback with `/blk rollback` command. Experimental.
+- Lightweight and straightforward. Should cause no performance degradation or blockage of main thread.
 
-### TODO
+### User-facing TODO
 
-- Graceful transaction recovery in case of SQLite errors.
+- Logging block modifications caused by mods and plugins (ie. WorldEdit, that stuff that cuts down trees automatically, etc)
 - Logging events of other types (piston, mobs).
-- More detail in interaction with containers (ie. logging what is added/removed).
+
+### Dev-facing TODO
+
+- Come up with something to simplify sending messages because color codes suck.
+- I feel the use of SQLite is pretty bulletproof but more error checks are always good.
+- Find potential hot paths and fix them. Performance and logging reliability are tied for #1
+- Find a way to properly stress test this. How do I cause realistic 100+ player load without a server with 100+ players? No idea yet.
 - Test suite.
+
+### Known issues
+
+- Container transactions: Currently transactions are related to a block, not a container. So you may have to check both blocks of a double chest, for example.
+- Not known, but `/blk rollback` is experimental.
+
+### Install
+
+- Drag the .jar into your plugins folder.
+- Set up permissions if using those (`blocklog.inspect`, `blocklog.rollback`)
+- Done
 
 ### Contribution
 
-- If you find an issue, create an issue and describe it non-vaguely enough.
-- If you have a suggestion, create an issue and describe it non-vaguely enough.
-- For either issues or suggestions:
-  - If you know how to code and are willing to, write your code and create a pull request.
-  - If you know how to code but are not willing to, at least try to describe things in a more technical manner.
+If you find issues please create an issue and describe it to your best of your ability.
+
+If you wish to contribute code, write it and open a pull request.
+
+No guarantees of acceptance, so if you wish to implement anything new please open an issue and ask first. I don't want to accept features onboard that I am not interested in keeping down the line, sorry.
+
 ### Licence
 
 Licenced under WTFPL 2.0

@@ -1,6 +1,5 @@
 name: BlockLog
 main: org.markski.blocklog.Main
-version: 0.2.0
 version: 0.3.0
 api-version: 1.20
 description: A lightweight block interaction logging plugin.
