@@ -1,7 +1,6 @@
 package org.markski.blocklog;
 
 import org.bukkit.plugin.Plugin;
-import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.sql.Connection;
@@ -15,18 +14,36 @@ import java.util.List;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 public class Database {
     private final Plugin plugin;
-    private Connection connection;
+
+    // Only used by dbExecutor.
+    private Connection writeConnection;
+
+    // For read only.
+    private String jdbcUrl;
 
     private final Queue<PendingBlockAction> pendingActions = new ConcurrentLinkedQueue<>();
     private final Queue<PendingContainerTransaction> pendingContainerTransactions = new ConcurrentLinkedQueue<>();
-    private BukkitTask flushTask;
 
     // 500 ticks seems to be a little under 30 seconds.
     private static final long FLUSH_INTERVAL_TICKS = 500L;
     private static final int MAX_QUEUE_SIZE = 50000;
+
+    // db worker
+    private final ScheduledExecutorService dbExecutor =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "BlockLog-DB");
+                t.setDaemon(true);
+                return t;
+            });
+
+    private ScheduledFuture<?> flushFuture;
 
     public Database(Plugin plugin) {
         this.plugin = plugin;
@@ -44,8 +61,11 @@ public class Database {
         File dbFile = new File(plugin.getDataFolder(), "blocklog.sqlite");
         boolean existedBefore = dbFile.exists();
 
-        String url = "jdbc:sqlite:" + dbFile.getAbsolutePath();
-        connection = DriverManager.getConnection(url);
+        jdbcUrl = "jdbc:sqlite:" + dbFile.getAbsolutePath();
+
+        // Open write connection. The writer thread owns it.
+        writeConnection = DriverManager.getConnection(jdbcUrl);
+        applyPragmas(writeConnection);
 
         if (!existedBefore) {
             plugin.getLogger().info("Created db: " + dbFile.getName());
@@ -54,30 +74,71 @@ public class Database {
         }
 
         createTables();
-        startAsyncFlushTask();
+        startDbFlushLoop();
     }
 
     public void close() {
-        // Try to flush everything before shutting down.
-        stopAsyncFlushTaskAndFlushNow();
+        stopDbFlushLoop();
 
-        if (connection != null) {
+        try {
+            flushPendingActionsNow();
+        } catch (Exception e) {
+            plugin.getLogger().severe("Failed final flush during shutdown: " + e.getMessage());
+        }
+
+        dbExecutor.shutdown();
+        try {
+            if (!dbExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                dbExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            dbExecutor.shutdownNow();
+        }
+
+        if (writeConnection != null) {
             try {
-                connection.close();
+                writeConnection.close();
                 plugin.getLogger().info("SQLite connection closed.");
             } catch (SQLException e) {
                 plugin.getLogger().severe("Error closing SQLite connection: " + e.getMessage());
             }
-            connection = null;
+            writeConnection = null;
         }
     }
 
+    /**
+     * TODO: Get rid of, or fix, whatever uses this shit.
+     */
     public Connection getConnection() {
-        return connection;
+        return writeConnection;
+    }
+
+    public boolean isOpen() {
+        return writeConnection != null;
     }
 
     public void flushPendingActionsNow() {
-        flushPendingActionsSafe();
+        if (writeConnection == null) {
+            return;
+        }
+
+        try {
+            // Wait for flush to run proper. Cannot be deferred, so if we block, we block.
+            dbExecutor.submit(this::flushPendingActionsSafe).get(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            plugin.getLogger().severe("Error waiting for flush: " + e.getMessage());
+        }
+    }
+
+    private void applyPragmas(Connection c) throws SQLException {
+        try (Statement stmt = c.createStatement()) {
+            stmt.execute("PRAGMA journal_mode=WAL;");
+            stmt.execute("PRAGMA synchronous=NORMAL;");
+            stmt.execute("PRAGMA foreign_keys=ON;");
+            // Good lord.
+            stmt.execute("PRAGMA busy_timeout=5000;");
+        }
     }
 
     private void createTables() throws SQLException {
@@ -97,7 +158,7 @@ public class Database {
                     );
                     """;
 
-        try (Statement stmt = connection.createStatement()) {
+        try (Statement stmt = writeConnection.createStatement()) {
             stmt.execute(sql);
 
             sql = """
@@ -162,11 +223,11 @@ public class Database {
             long createdAt,
             BlockActionCause cause
     ) {
-        if (connection == null) {
+        if (writeConnection == null) {
             return null;
         }
 
-        // JetBrains says .size() is O(n). Carrying a counter could be easy enough. If it matters.
+        // JetBrains suggests an AtomicInteger. But this is super unlikely to ever become hot.
         if (pendingActions.size() >= MAX_QUEUE_SIZE) {
             plugin.getLogger().warning("BlockLog queue full, event dropped.");
             return null;
@@ -201,7 +262,7 @@ public class Database {
             int delta,
             long createdAt
     ) {
-        if (connection == null) {
+        if (writeConnection == null) {
             return;
         }
         if (eventId == null) {
@@ -230,25 +291,27 @@ public class Database {
         ));
     }
 
-    private void startAsyncFlushTask() {
-        if (flushTask != null) {
+    private void startDbFlushLoop() {
+        if (flushFuture != null) {
             return;
         }
 
-        flushTask = plugin.getServer().getScheduler().runTaskTimerAsynchronously(
-                plugin,
+        // Convert ticks to ms (~20 ticks per second).
+        long periodMs = Math.max(250L, (FLUSH_INTERVAL_TICKS * 50L));
+
+        flushFuture = dbExecutor.scheduleAtFixedRate(
                 this::flushPendingActionsSafe,
-                FLUSH_INTERVAL_TICKS,
-                FLUSH_INTERVAL_TICKS
+                periodMs,
+                periodMs,
+                TimeUnit.MILLISECONDS
         );
     }
 
-    private void stopAsyncFlushTaskAndFlushNow() {
-        if (flushTask != null) {
-            flushTask.cancel();
-            flushTask = null;
+    private void stopDbFlushLoop() {
+        if (flushFuture != null) {
+            flushFuture.cancel(false);
+            flushFuture = null;
         }
-        flushPendingActionsSafe();
     }
 
     private void flushPendingActionsSafe() {
@@ -260,7 +323,7 @@ public class Database {
     }
 
     private void flushPendingActions() throws SQLException {
-        if (connection == null) {
+        if (writeConnection == null) {
             pendingActions.clear();
             pendingContainerTransactions.clear();
             return;
@@ -314,11 +377,11 @@ public class Database {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """;
 
-        boolean oldAutoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
+        boolean oldAutoCommit = writeConnection.getAutoCommit();
+        writeConnection.setAutoCommit(false);
 
-        try (PreparedStatement eventsPs = connection.prepareStatement(sql);
-             PreparedStatement txPs = connection.prepareStatement(txSql)) {
+        try (PreparedStatement eventsPs = writeConnection.prepareStatement(sql);
+             PreparedStatement txPs = writeConnection.prepareStatement(txSql)) {
 
             for (PendingBlockAction a : eventsBatch) {
                 eventsPs.setString(1, a.id());
@@ -339,6 +402,7 @@ public class Database {
                 eventsPs.addBatch();
             }
 
+            // In the quiet words of the virgin mary, I fucking hate this syntax
             for (PendingContainerTransaction t : txBatch) {
                 txPs.setString(1, t.id());
                 txPs.setString(2, t.eventId());
@@ -361,9 +425,9 @@ public class Database {
                 txPs.executeBatch();
             }
 
-            connection.commit();
+            writeConnection.commit();
         } catch (SQLException e) {
-            connection.rollback();
+            writeConnection.rollback();
 
             // Restore batches so we don't silently lose data.
             pendingActions.addAll(eventsBatch);
@@ -372,8 +436,17 @@ public class Database {
             plugin.getLogger().severe("Failed to flush batch: " + e.getMessage());
             throw e;
         } finally {
-            connection.setAutoCommit(oldAutoCommit);
+            writeConnection.setAutoCommit(oldAutoCommit);
         }
+    }
+
+    private Connection openReadConnection() throws SQLException {
+        if (jdbcUrl == null) {
+            throw new SQLException("Database not initialized.");
+        }
+        Connection c = DriverManager.getConnection(jdbcUrl);
+        applyPragmas(c);
+        return c;
     }
 
     private record PendingBlockAction(
@@ -411,7 +484,7 @@ public class Database {
                        action,
                        created_at,
                        cause
-                FROM block_actions
+                FROM events
                 WHERE world = ?
                   AND x = ?
                   AND y = ?
@@ -422,7 +495,9 @@ public class Database {
 
         List<BlockLogEntry> result = new ArrayList<>();
 
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+        try (Connection c = openReadConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+
             ps.setString(1, worldName);
             ps.setInt(2, x);
             ps.setInt(3, y);
@@ -476,20 +551,22 @@ public class Database {
                        block_type,
                        action,
                        created_at
-                FROM block_actions
+                FROM events
                 WHERE world = ?
                   AND player_name = ?
                   AND created_at >= ?
                   AND x BETWEEN ? AND ?
                   AND y BETWEEN ? AND ?
                   AND z BETWEEN ? AND ?
-                  AND action IN ("PLACED", "BROKEN")
+                  AND action IN (?, ?)
                 ORDER BY created_at ASC;
                 """;
 
         List<RollbackEntry> result = new ArrayList<>();
 
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+        try (Connection c = openReadConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+
             ps.setString(1, worldName);
             ps.setString(2, playerName);
             ps.setLong(3, fromTime);
@@ -499,6 +576,10 @@ public class Database {
             ps.setInt(7, maxY);
             ps.setInt(8, minZ);
             ps.setInt(9, maxZ);
+
+            // only placed/broken
+            ps.setInt(10, BlockActionType.PLACED.getCode());
+            ps.setInt(11, BlockActionType.BROKEN.getCode());
 
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {

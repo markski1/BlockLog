@@ -130,7 +130,7 @@ public class BlockActionListener implements Listener {
         }
 
         var db = plugin.getDatabase();
-        if (db == null || db.getConnection() == null) {
+        if (db == null || !db.isOpen()) {
             return;
         }
 
@@ -173,7 +173,7 @@ public class BlockActionListener implements Listener {
 
     private void inspectBlock(Player player, Block block) {
         var db = plugin.getDatabase();
-        if (db == null || db.getConnection() == null) {
+        if (db == null || !db.isOpen()) {
             player.sendMessage("§cDatabase not available.");
             return;
         }
@@ -201,7 +201,7 @@ public class BlockActionListener implements Listener {
             // Must send messages at the main thread.
             var finalEntries = entries;
             server.getScheduler().runTask(plugin, () -> {
-                player.sendMessage("§e[History] §7" + "§f(" + x + ", " + y + ", " + y + ", " + z + "):");
+                player.sendMessage("§e[History] §7" + "§f(" + x + ", " + y + ", " + z + "):");
 
                 if (finalEntries.isEmpty()) {
                     player.sendMessage("§7No logged actions for this block.");
@@ -233,7 +233,7 @@ public class BlockActionListener implements Listener {
 
     private String logAction(Player player, Block block, BlockActionType action) {
         var db = plugin.getDatabase();
-        if (db == null || db.getConnection() == null) {
+        if (db == null || !db.isOpen()) {
             return null;
         }
 
@@ -260,7 +260,7 @@ public class BlockActionListener implements Listener {
 
     private void logExplosion(Block block) {
         var db = plugin.getDatabase();
-        if (db == null || db.getConnection() == null) {
+        if (db == null || !db.isOpen()) {
             return;
         }
 
