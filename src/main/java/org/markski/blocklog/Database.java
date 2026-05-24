@@ -9,7 +9,9 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Queue;
 import java.util.UUID;
@@ -35,8 +37,46 @@ public class Database {
     private static final long FLUSH_INTERVAL_TICKS = 500L;
     private static final int MAX_QUEUE_SIZE = 50000;
     private static final int WAL_CHECKPOINT_INTERVAL = 10;
+    private static final int MAX_READ_POOL_SIZE = 3;
 
     private int flushCount = 0;
+
+    private final Deque<Connection> readPool = new ArrayDeque<>();
+
+    private static final String EVENTS_INSERT_SQL = """
+            INSERT INTO events (
+                id,
+                player_uuid,
+                player_name,
+                world,
+                x,
+                y,
+                z,
+                block_type,
+                action,
+                created_at,
+                cause
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """;
+
+    private static final String TX_INSERT_SQL = """
+            INSERT INTO container_transactions (
+                id,
+                event_id,
+                player_uuid,
+                player_name,
+                world,
+                x,
+                y,
+                z,
+                item_type,
+                delta,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """;
+
+    private PreparedStatement eventsInsertPs;
+    private PreparedStatement txInsertPs;
 
     // db worker
     private final ScheduledExecutorService dbExecutor =
@@ -100,6 +140,11 @@ public class Database {
         }
 
         if (writeConnection != null) {
+            closeQuietly(eventsInsertPs);
+            closeQuietly(txInsertPs);
+            eventsInsertPs = null;
+            txInsertPs = null;
+
             try {
                 writeConnection.close();
                 plugin.getLogger().info("SQLite connection closed.");
@@ -107,6 +152,17 @@ public class Database {
                 plugin.getLogger().severe("Error closing SQLite connection: " + e.getMessage());
             }
             writeConnection = null;
+        }
+
+        Connection pooled;
+        while ((pooled = readPool.poll()) != null) {
+            closeQuietly(pooled);
+        }
+    }
+
+    private static void closeQuietly(AutoCloseable ac) {
+        if (ac != null) {
+            try { ac.close(); } catch (Exception ignored) {}
         }
     }
 
@@ -355,84 +411,58 @@ public class Database {
             return;
         }
 
-        String sql = """
-                INSERT INTO events (
-                    id,
-                    player_uuid,
-                    player_name,
-                    world,
-                    x,
-                    y,
-                    z,
-                    block_type,
-                    action,
-                    created_at,
-                    cause
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """;
-
-        String txSql = """
-                INSERT INTO container_transactions (
-                    id,
-                    event_id,
-                    player_uuid,
-                    player_name,
-                    world,
-                    x,
-                    y,
-                    z,
-                    item_type,
-                    delta,
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """;
-
         boolean oldAutoCommit = writeConnection.getAutoCommit();
         writeConnection.setAutoCommit(false);
 
-        try (PreparedStatement eventsPs = writeConnection.prepareStatement(sql);
-             PreparedStatement txPs = writeConnection.prepareStatement(txSql)) {
-
-            for (PendingBlockAction a : eventsBatch) {
-                eventsPs.setString(1, a.id());
-                eventsPs.setString(2, a.playerUuid());
-                eventsPs.setString(3, a.playerName());
-                eventsPs.setString(4, a.worldName());
-                eventsPs.setInt(5, a.x());
-                eventsPs.setInt(6, a.y());
-                eventsPs.setInt(7, a.z());
-                eventsPs.setString(8, a.blockType());
-                eventsPs.setInt(9, a.action().getCode());
-                eventsPs.setLong(10, a.createdAt());
-                if (a.cause() != null) {
-                    eventsPs.setInt(11, a.cause().getCode());
-                } else {
-                    eventsPs.setNull(11, java.sql.Types.INTEGER);
-                }
-                eventsPs.addBatch();
+        try {
+            if (eventsInsertPs == null || eventsInsertPs.isClosed()) {
+                eventsInsertPs = writeConnection.prepareStatement(EVENTS_INSERT_SQL);
+            }
+            if (txInsertPs == null || txInsertPs.isClosed()) {
+                txInsertPs = writeConnection.prepareStatement(TX_INSERT_SQL);
             }
 
-            // In the quiet words of the virgin mary, I fucking hate this syntax
+            for (PendingBlockAction a : eventsBatch) {
+                eventsInsertPs.setString(1, a.id());
+                eventsInsertPs.setString(2, a.playerUuid());
+                eventsInsertPs.setString(3, a.playerName());
+                eventsInsertPs.setString(4, a.worldName());
+                eventsInsertPs.setInt(5, a.x());
+                eventsInsertPs.setInt(6, a.y());
+                eventsInsertPs.setInt(7, a.z());
+                eventsInsertPs.setString(8, a.blockType());
+                eventsInsertPs.setInt(9, a.action().getCode());
+                eventsInsertPs.setLong(10, a.createdAt());
+                if (a.cause() != null) {
+                    eventsInsertPs.setInt(11, a.cause().getCode());
+                } else {
+                    eventsInsertPs.setNull(11, java.sql.Types.INTEGER);
+                }
+                eventsInsertPs.addBatch();
+            }
+
             for (PendingContainerTransaction t : txBatch) {
-                txPs.setString(1, t.id());
-                txPs.setString(2, t.eventId());
-                txPs.setString(3, t.playerUuid());
-                txPs.setString(4, t.playerName());
-                txPs.setString(5, t.worldName());
-                txPs.setInt(6, t.x());
-                txPs.setInt(7, t.y());
-                txPs.setInt(8, t.z());
-                txPs.setString(9, t.itemType());
-                txPs.setInt(10, t.delta());
-                txPs.setLong(11, t.createdAt());
-                txPs.addBatch();
+                txInsertPs.setString(1, t.id());
+                txInsertPs.setString(2, t.eventId());
+                txInsertPs.setString(3, t.playerUuid());
+                txInsertPs.setString(4, t.playerName());
+                txInsertPs.setString(5, t.worldName());
+                txInsertPs.setInt(6, t.x());
+                txInsertPs.setInt(7, t.y());
+                txInsertPs.setInt(8, t.z());
+                txInsertPs.setString(9, t.itemType());
+                txInsertPs.setInt(10, t.delta());
+                txInsertPs.setLong(11, t.createdAt());
+                txInsertPs.addBatch();
             }
 
             if (!eventsBatch.isEmpty()) {
-                eventsPs.executeBatch();
+                eventsInsertPs.executeBatch();
+                eventsInsertPs.clearParameters();
             }
             if (!txBatch.isEmpty()) {
-                txPs.executeBatch();
+                txInsertPs.executeBatch();
+                txInsertPs.clearParameters();
             }
 
             writeConnection.commit();
@@ -444,6 +474,11 @@ public class Database {
                 }
             }
         } catch (SQLException e) {
+            closeQuietly(eventsInsertPs);
+            closeQuietly(txInsertPs);
+            eventsInsertPs = null;
+            txInsertPs = null;
+
             writeConnection.rollback();
 
             // Restore batches so we don't silently lose data.
@@ -457,7 +492,30 @@ public class Database {
         }
     }
 
-    private Connection openReadConnection() throws SQLException {
+    private Connection borrowReadConnection() throws SQLException {
+        synchronized (readPool) {
+            Connection c = readPool.poll();
+            if (c != null) {
+                return c;
+            }
+        }
+        return createReadConnection();
+    }
+
+    private void returnReadConnection(Connection c) {
+        if (c == null) {
+            return;
+        }
+        synchronized (readPool) {
+            if (readPool.size() < MAX_READ_POOL_SIZE) {
+                readPool.push(c);
+                return;
+            }
+        }
+        closeQuietly(c);
+    }
+
+    private Connection createReadConnection() throws SQLException {
         if (jdbcUrl == null) {
             throw new SQLException("Database not initialized.");
         }
@@ -512,8 +570,10 @@ public class Database {
 
         List<BlockLogEntry> result = new ArrayList<>();
 
-        try (Connection c = openReadConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
+        Connection c = null;
+        try {
+            c = borrowReadConnection();
+            PreparedStatement ps = c.prepareStatement(sql);
 
             ps.setString(1, worldName);
             ps.setInt(2, x);
@@ -544,7 +604,11 @@ public class Database {
                             cause
                     ));
                 }
+            } finally {
+                ps.close();
             }
+        } finally {
+            returnReadConnection(c);
         }
 
         return result;
@@ -581,8 +645,10 @@ public class Database {
 
         List<RollbackEntry> result = new ArrayList<>();
 
-        try (Connection c = openReadConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
+        Connection c = null;
+        try {
+            c = borrowReadConnection();
+            PreparedStatement ps = c.prepareStatement(sql);
 
             ps.setString(1, worldName);
             ps.setString(2, playerName);
@@ -618,7 +684,11 @@ public class Database {
                             createdAt
                     ));
                 }
+            } finally {
+                ps.close();
             }
+        } finally {
+            returnReadConnection(c);
         }
 
         return result;

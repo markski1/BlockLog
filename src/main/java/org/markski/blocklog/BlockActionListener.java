@@ -14,6 +14,7 @@ import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 
@@ -21,7 +22,9 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -107,15 +110,36 @@ public class BlockActionListener implements Listener {
     }
 
     @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        UUID playerId = event.getPlayer().getUniqueId();
+        openContainers.remove(playerId);
+        plugin.removeInspecting(playerId);
+    }
+
+    @EventHandler
     public void onInventoryClose(InventoryCloseEvent event) {
         if (!(event.getPlayer() instanceof Player player)) {
             return;
         }
 
-        OpenContainerSession session = openContainers.remove(player.getUniqueId());
+        InventoryHolder holder = event.getView().getTopInventory().getHolder();
+        if (!(holder instanceof BlockState blockState)) {
+            return;
+        }
+
+        OpenContainerSession session = openContainers.get(player.getUniqueId());
         if (session == null) {
             return;
         }
+
+        if (!session.worldName().equals(blockState.getWorld().getName())
+                || session.x() != blockState.getX()
+                || session.y() != blockState.getY()
+                || session.z() != blockState.getZ()) {
+            return;
+        }
+
+        openContainers.remove(player.getUniqueId());
 
         // diff snapshot against final container contents.
         Map<Material, Integer> after = countItems(event.getView().getTopInventory().getContents());
@@ -159,16 +183,64 @@ public class BlockActionListener implements Listener {
 
     @EventHandler
     public void onEntityExplode(EntityExplodeEvent event) {
+        List<ExplosionBlockData> blocks = new ArrayList<>();
         for (Block block : event.blockList()) {
-            logExplosion(block);
+            blocks.add(new ExplosionBlockData(
+                    block.getWorld().getName(),
+                    block.getX(), block.getY(), block.getZ(),
+                    block.getType().name()
+            ));
         }
+        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+            var db = plugin.getDatabase();
+            if (db == null || !db.isOpen()) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            for (ExplosionBlockData data : blocks) {
+                db.enqueueBlockAction(
+                        "00000000-0000-0000-0000-000000000000",
+                        "[EXPLOSION]",
+                        data.worldName(),
+                        data.x(), data.y(), data.z(),
+                        data.blockType(),
+                        BlockActionType.BROKEN,
+                        now,
+                        BlockActionCause.EXPLOSION
+                );
+            }
+        });
     }
 
     @EventHandler
     public void onBlockExplode(BlockExplodeEvent event) {
+        List<ExplosionBlockData> blocks = new ArrayList<>();
         for (Block block : event.blockList()) {
-            logExplosion(block);
+            blocks.add(new ExplosionBlockData(
+                    block.getWorld().getName(),
+                    block.getX(), block.getY(), block.getZ(),
+                    block.getType().name()
+            ));
         }
+        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+            var db = plugin.getDatabase();
+            if (db == null || !db.isOpen()) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            for (ExplosionBlockData data : blocks) {
+                db.enqueueBlockAction(
+                        "00000000-0000-0000-0000-000000000000",
+                        "[EXPLOSION]",
+                        data.worldName(),
+                        data.x(), data.y(), data.z(),
+                        data.blockType(),
+                        BlockActionType.BROKEN,
+                        now,
+                        BlockActionCause.EXPLOSION
+                );
+            }
+        });
     }
 
     private void inspectBlock(Player player, Block block) {
@@ -258,31 +330,6 @@ public class BlockActionListener implements Listener {
         );
     }
 
-    private void logExplosion(Block block) {
-        var db = plugin.getDatabase();
-        if (db == null || !db.isOpen()) {
-            return;
-        }
-
-        String worldName = block.getWorld().getName();
-        int x = block.getX();
-        int y = block.getY();
-        int z = block.getZ();
-        String blockType = block.getType().name();
-        long now = System.currentTimeMillis();
-
-        db.enqueueBlockAction(
-                "00000000-0000-0000-0000-000000000000",
-                "[EXPLOSION]",
-                worldName,
-                x, y, z,
-                blockType,
-                BlockActionType.BROKEN,
-                now,
-                BlockActionCause.EXPLOSION
-        );
-    }
-
     private boolean isInteractiveBlock(Block block) {
         Material type = block.getType();
 
@@ -343,4 +390,6 @@ public class BlockActionListener implements Listener {
             int z,
             Map<Material, Integer> snapshot
     ) {}
+
+    private record ExplosionBlockData(String worldName, int x, int y, int z, String blockType) {}
 }

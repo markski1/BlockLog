@@ -64,4 +64,8 @@ public class Main extends JavaPlugin {
             return true;
         }
     }
+
+    public void removeInspecting(UUID playerId) {
+        inspectingPlayers.remove(playerId);
+    }
 }
