@@ -46,11 +46,9 @@ public class BklCommand implements CommandExecutor {
                 return true;
             }
 
-            // Just to ensure the "latter" actions are in there, flush it all to db.
-            // "Real" solution would be for inspect to check the db AND also the flush queue, but I don't like
-            // how that might affect dev(me) UX as the plugin potentially gets more complex.
+            // Request a non-blocking background flush so recent actions are persisted.
             Database db = plugin.getDatabase();
-            db.flushPendingActionsNow();
+            db.requestFlush();
 
             boolean nowInspecting = plugin.toggleInspect(executor.getUniqueId());
             if (nowInspecting) {
@@ -136,51 +134,62 @@ public class BklCommand implements CommandExecutor {
                     return;
                 }
 
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    int affected = 0;
-                    int skipped = 0;
-                    int radiusSq = radius * radius;
+                final int radiusSq = radius * radius;
+                Bukkit.getScheduler().runTask(plugin, new Runnable() {
+                    private int index = 0;
+                    private int affected = 0;
+                    private int skipped = 0;
+                    private static final int BATCH_SIZE = 64;
 
-                    for (Database.RollbackEntry e : entries) {
-                        int x = e.x();
-                        int y = e.y();
-                        int z = e.z();
+                    @Override
+                    public void run() {
+                        int processed = 0;
+                        while (processed < BATCH_SIZE && index < entries.size()) {
+                            Database.RollbackEntry e = entries.get(index);
+                            int x = e.x();
+                            int y = e.y();
+                            int z = e.z();
 
-                        int dx = x - cx;
-                        int dy = y - cy;
-                        int dz = z - cz;
+                            int dx = x - cx;
+                            int dy = y - cy;
+                            int dz = z - cz;
 
-                        if (dx * dx + dy * dy + dz * dz > radiusSq) {
-                            continue;
+                            if (dx * dx + dy * dy + dz * dz <= radiusSq) {
+                                var block = world.getBlockAt(x, y, z);
+                                Material current = block.getType();
+                                Material logged = Material.matchMaterial(e.blockType());
+
+                                if (logged != null) {
+                                    if (e.action() == BlockActionType.PLACED) {
+                                        if (current == logged) {
+                                            block.setType(Material.AIR, false);
+                                            affected++;
+                                        } else {
+                                            skipped++;
+                                        }
+                                    } else if (e.action() == BlockActionType.BROKEN) {
+                                        if (current == Material.AIR) {
+                                            block.setType(logged, false);
+                                            affected++;
+                                        } else {
+                                            skipped++;
+                                        }
+                                    }
+                                } else {
+                                    skipped++;
+                                }
+                            }
+
+                            index++;
+                            processed++;
                         }
 
-                        var block = world.getBlockAt(x, y, z);
-                        Material current = block.getType();
-                        Material logged = Material.matchMaterial(e.blockType());
-
-                        if (logged == null) {
-                            skipped++;
-                            continue;
-                        }
-
-                        if (e.action() == BlockActionType.PLACED) {
-                            if (current == logged) {
-                                block.setType(Material.AIR, false);
-                                affected++;
-                            } else {
-                                skipped++;
-                            }
-                        } else if (e.action() == BlockActionType.BROKEN) {
-                            if (current == Material.AIR) {
-                                block.setType(logged, false);
-                                affected++;
-                            } else {
-                                skipped++;
-                            }
+                        if (index >= entries.size()) {
+                            sender.sendMessage("§aRollback complete. §b" + affected + "§a blocks changed, §7" + skipped + " skipped.");
+                        } else {
+                            Bukkit.getScheduler().runTask(plugin, this);
                         }
                     }
-
-                    sender.sendMessage("§aRollback complete. §b" + affected + "§a blocks changed, §7" + skipped + " skipped.");
                 });
             });
 

@@ -34,6 +34,9 @@ public class Database {
     // 500 ticks seems to be a little under 30 seconds.
     private static final long FLUSH_INTERVAL_TICKS = 500L;
     private static final int MAX_QUEUE_SIZE = 50000;
+    private static final int WAL_CHECKPOINT_INTERVAL = 10;
+
+    private int flushCount = 0;
 
     // db worker
     private final ScheduledExecutorService dbExecutor =
@@ -129,6 +132,13 @@ public class Database {
         } catch (Exception e) {
             plugin.getLogger().severe("Error waiting for flush: " + e.getMessage());
         }
+    }
+
+    public void requestFlush() {
+        if (writeConnection == null) {
+            return;
+        }
+        dbExecutor.submit(this::flushPendingActionsSafe);
     }
 
     private void applyPragmas(Connection c) throws SQLException {
@@ -426,6 +436,13 @@ public class Database {
             }
 
             writeConnection.commit();
+
+            flushCount++;
+            if (flushCount % WAL_CHECKPOINT_INTERVAL == 0) {
+                try (Statement checkpointStmt = writeConnection.createStatement()) {
+                    checkpointStmt.execute("PRAGMA wal_checkpoint(PASSIVE);");
+                }
+            }
         } catch (SQLException e) {
             writeConnection.rollback();
 
