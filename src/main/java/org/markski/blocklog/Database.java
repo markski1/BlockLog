@@ -17,6 +17,7 @@ import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -32,6 +33,8 @@ public class Database {
 
     private final Queue<PendingBlockAction> pendingActions = new ConcurrentLinkedQueue<>();
     private final Queue<PendingContainerTransaction> pendingContainerTransactions = new ConcurrentLinkedQueue<>();
+    private final AtomicInteger pendingActionsCount = new AtomicInteger();
+    private final AtomicInteger pendingContainerTransactionsCount = new AtomicInteger();
 
     // 500 ticks seems to be a little under 30 seconds.
     private static final long FLUSH_INTERVAL_TICKS = 500L;
@@ -293,8 +296,7 @@ public class Database {
             return null;
         }
 
-        // JetBrains suggests an AtomicInteger. But this is super unlikely to ever become hot.
-        if (pendingActions.size() >= MAX_QUEUE_SIZE) {
+        if (pendingActionsCount.get() >= MAX_QUEUE_SIZE) {
             plugin.getLogger().warning("BlockLog queue full, event dropped.");
             return null;
         }
@@ -312,6 +314,7 @@ public class Database {
                 createdAt,
                 cause
         ));
+        pendingActionsCount.incrementAndGet();
 
         return uuid.toString();
     }
@@ -338,7 +341,7 @@ public class Database {
             return;
         }
 
-        if (pendingContainerTransactions.size() >= MAX_QUEUE_SIZE) {
+        if (pendingContainerTransactionsCount.get() >= MAX_QUEUE_SIZE) {
             plugin.getLogger().warning("BlockLog queue full, container transaction dropped.");
             return;
         }
@@ -355,6 +358,7 @@ public class Database {
                 delta,
                 createdAt
         ));
+        pendingContainerTransactionsCount.incrementAndGet();
     }
 
     private void startDbFlushLoop() {
@@ -392,6 +396,8 @@ public class Database {
         if (writeConnection == null) {
             pendingActions.clear();
             pendingContainerTransactions.clear();
+            pendingActionsCount.set(0);
+            pendingContainerTransactionsCount.set(0);
             return;
         }
 
@@ -399,12 +405,14 @@ public class Database {
         PendingBlockAction action;
         while ((action = pendingActions.poll()) != null) {
             eventsBatch.add(action);
+            pendingActionsCount.decrementAndGet();
         }
 
         List<PendingContainerTransaction> txBatch = new ArrayList<>();
         PendingContainerTransaction tx;
         while ((tx = pendingContainerTransactions.poll()) != null) {
             txBatch.add(tx);
+            pendingContainerTransactionsCount.decrementAndGet();
         }
 
         if (eventsBatch.isEmpty() && txBatch.isEmpty()) {
@@ -479,11 +487,17 @@ public class Database {
             eventsInsertPs = null;
             txInsertPs = null;
 
-            writeConnection.rollback();
+            try {
+                writeConnection.rollback();
+            } catch (SQLException rollbackEx) {
+                e.addSuppressed(rollbackEx);
+            }
 
             // Restore batches so we don't silently lose data.
             pendingActions.addAll(eventsBatch);
             pendingContainerTransactions.addAll(txBatch);
+            pendingActionsCount.addAndGet(eventsBatch.size());
+            pendingContainerTransactionsCount.addAndGet(txBatch.size());
 
             plugin.getLogger().severe("Failed to flush batch: " + e.getMessage());
             throw e;
@@ -511,8 +525,8 @@ public class Database {
                 readPool.push(c);
                 return;
             }
+            closeQuietly(c);
         }
-        closeQuietly(c);
     }
 
     private Connection createReadConnection() throws SQLException {
