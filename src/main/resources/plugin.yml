@@ -18,5 +18,3 @@ permissions:
   blocklog.rollback:
     description: Allows using /bkl rollback.
     default: op
-    permission: blocklog.use
-    permission-message: "§cYou don't have permission to use BlockLog commands."
