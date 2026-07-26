@@ -654,7 +654,7 @@ public class Database {
                   AND y BETWEEN ? AND ?
                   AND z BETWEEN ? AND ?
                   AND action IN (?, ?)
-                ORDER BY created_at ASC;
+                ORDER BY created_at DESC, rowid DESC;
                 """;
 
         List<RollbackEntry> result = new ArrayList<>();

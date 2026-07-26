@@ -6,6 +6,7 @@ import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
@@ -39,37 +40,53 @@ public class BlockActionListener implements Listener {
         this.plugin = plugin;
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onBlockBreakInspect(BlockBreakEvent event) {
+        Player player = event.getPlayer();
+
+        if (plugin.isInspecting(player.getUniqueId())) {
+            event.setCancelled(true);
+            inspectBlock(player, event.getBlock());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockBreak(BlockBreakEvent event) {
-        Player player = event.getPlayer();
-        Block block = event.getBlock();
-
-        if (plugin.isInspecting(player.getUniqueId())) {
-            // If inspecting, don't let actions go through, just inspect the coords.
-            event.setCancelled(true);
-            inspectBlock(player, block);
-            return;
-        }
-
-        logAction(player, block, BlockActionType.BROKEN);
+        logAction(event.getPlayer(), event.getBlock(), BlockActionType.BROKEN);
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onBlockPlaceInspect(BlockPlaceEvent event) {
+        Player player = event.getPlayer();
+
+        if (plugin.isInspecting(player.getUniqueId())) {
+            event.setCancelled(true);
+            inspectBlock(player, event.getBlockPlaced());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockPlace(BlockPlaceEvent event) {
-        Player player = event.getPlayer();
-        Block placed = event.getBlockPlaced();
+        logAction(event.getPlayer(), event.getBlockPlaced(), BlockActionType.PLACED);
+    }
 
-        if (plugin.isInspecting(player.getUniqueId())) {
-            // If inspecting, don't let actions go through, just inspect the coords.
-            event.setCancelled(true);
-            inspectBlock(player, placed);
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onPlayerInteractInspect(PlayerInteractEvent event) {
+        Player player = event.getPlayer();
+        Action action = event.getAction();
+
+        if (!plugin.isInspecting(player.getUniqueId())
+                || (action != Action.LEFT_CLICK_BLOCK && action != Action.RIGHT_CLICK_BLOCK)) {
             return;
         }
 
-        logAction(player, placed, BlockActionType.PLACED);
+        Block clicked = event.getClickedBlock();
+        if (clicked != null) {
+            inspectBlock(player, clicked);
+        }
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerInteract(PlayerInteractEvent event) {
         Player player = event.getPlayer();
         Action action = event.getAction();
@@ -81,7 +98,6 @@ public class BlockActionListener implements Listener {
         Block clicked = event.getClickedBlock();
         if (clicked != null) {
             if (plugin.isInspecting(player.getUniqueId())) {
-                inspectBlock(player, clicked);
                 return;
             }
 
@@ -181,7 +197,7 @@ public class BlockActionListener implements Listener {
         }
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onEntityExplode(EntityExplodeEvent event) {
         List<ExplosionBlockData> blocks = new ArrayList<>();
         for (Block block : event.blockList()) {
@@ -212,7 +228,7 @@ public class BlockActionListener implements Listener {
         });
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockExplode(BlockExplodeEvent event) {
         List<ExplosionBlockData> blocks = new ArrayList<>();
         for (Block block : event.blockList()) {
