@@ -1,3 +1,6 @@
+import groovy.json.JsonOutput
+import java.security.MessageDigest
+
 plugins {
     id 'java'
 }
@@ -12,16 +15,30 @@ java {
     }
 }
 
-repositories {
-    mavenCentral()
-    maven {
-        url = 'https://repo.papermc.io/repository/maven-public/'
-    }
-}
-
 dependencies {
     compileOnly 'io.papermc.paper:paper-api:26.2.build.65-beta'
     compileOnly 'org.xerial:sqlite-jdbc:3.53.2.0'
+}
+
+dependencyLocking {
+    lockAllConfigurations()
+}
+
+configurations.configureEach {
+    resolutionStrategy {
+        failOnDynamicVersions()
+        failOnChangingVersions()
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs.addAll(['-Xlint:all', '-Werror'])
+}
+
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
 }
 
 tasks.jar {
@@ -32,3 +49,55 @@ tasks.jar {
 test {
     useJUnitPlatform()
 }
+
+def sbomOutput = layout.buildDirectory.file('reports/bom.cdx.json')
+
+tasks.register('cyclonedxBom') {
+    group = 'reporting'
+    description = 'Generates a CycloneDX SBOM for the compile classpath.'
+    inputs.files(configurations.compileClasspath)
+    outputs.file(sbomOutput)
+
+    doLast {
+        def components = configurations.compileClasspath.resolvedConfiguration.resolvedArtifacts.collect { artifact ->
+            MessageDigest digest = MessageDigest.getInstance('SHA-256')
+            artifact.file.withInputStream { input ->
+                byte[] buffer = new byte[8192]
+                int count
+                while ((count = input.read(buffer)) != -1) {
+                    digest.update(buffer, 0, count)
+                }
+            }
+
+            def module = artifact.moduleVersion.id
+            def reference = "pkg:maven/${module.group}/${module.name}@${module.version}"
+            [
+                    type    : 'library',
+                    'bom-ref': reference,
+                    group   : module.group,
+                    name    : module.name,
+                    version : module.version,
+                    purl    : reference,
+                    hashes  : [[alg: 'SHA-256', content: digest.digest().encodeHex().toString()]]
+            ]
+        }.sort { left, right -> left['bom-ref'] <=> right['bom-ref'] }
+
+        def bom = [
+                bomFormat  : 'CycloneDX',
+                specVersion: '1.6',
+                version    : 1,
+                metadata   : [component: [
+                        type   : 'application',
+                        group  : project.group.toString(),
+                        name   : project.name,
+                        version: project.version.toString()
+                ]],
+                components : components
+        ]
+        def outputFile = sbomOutput.get().asFile
+        outputFile.parentFile.mkdirs()
+        outputFile.setText(JsonOutput.prettyPrint(JsonOutput.toJson(bom)) + System.lineSeparator(), 'UTF-8')
+    }
+}
+
+check.dependsOn tasks.named('cyclonedxBom')

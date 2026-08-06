@@ -64,10 +64,11 @@ public class Database {
                 z,
                 block_type,
                 block_data,
+                rollback_skip_reason,
                 action,
                 created_at,
                 cause
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """;
 
     private static final String TX_INSERT_SQL = """
@@ -143,6 +144,7 @@ public class Database {
 
         createTables();
         validateSchema();
+        failInterruptedRollbackAudits();
         open = true;
         startDbFlushLoop();
     }
@@ -255,6 +257,7 @@ public class Database {
                         z            INTEGER NOT NULL,
                         block_type   TEXT    NOT NULL,
                         block_data   TEXT    NOT NULL,
+                        rollback_skip_reason TEXT,
                         action       INTEGER NOT NULL,  -- BlockActionType code
                         created_at   INTEGER NOT NULL,
                         cause        INTEGER            -- BlockActionCause code, nullable
@@ -273,6 +276,37 @@ public class Database {
             sql = """
                     CREATE INDEX IF NOT EXISTS idx_events_player_time
                     ON events (player_uuid, created_at);
+                    """;
+            stmt.execute(sql);
+
+            sql = """
+                    CREATE TABLE IF NOT EXISTS rollback_audits (
+                        id                  TEXT PRIMARY KEY NOT NULL,
+                        executor_uuid       TEXT    NOT NULL,
+                        executor_name       TEXT    NOT NULL,
+                        target_uuid         TEXT    NOT NULL,
+                        target_name         TEXT    NOT NULL,
+                        world               TEXT    NOT NULL,
+                        center_x            INTEGER NOT NULL,
+                        center_y            INTEGER NOT NULL,
+                        center_z            INTEGER NOT NULL,
+                        radius              INTEGER NOT NULL,
+                        from_time           INTEGER NOT NULL,
+                        preview_events      INTEGER NOT NULL,
+                        preview_unsupported INTEGER NOT NULL,
+                        started_at          INTEGER NOT NULL,
+                        completed_at        INTEGER,
+                        status              TEXT    NOT NULL,
+                        affected            INTEGER,
+                        skipped             INTEGER,
+                        details             TEXT
+                    );
+                    """;
+            stmt.execute(sql);
+
+            sql = """
+                    CREATE INDEX IF NOT EXISTS idx_rollback_audits_started_at
+                    ON rollback_audits (started_at DESC);
                     """;
             stmt.execute(sql);
 
@@ -329,6 +363,7 @@ public class Database {
             int z,
             String blockType,
             String blockData,
+            String rollbackSkipReason,
             BlockActionType action,
             long createdAt,
             BlockActionCause cause
@@ -353,6 +388,7 @@ public class Database {
                     x, y, z,
                     blockType,
                     blockData,
+                    rollbackSkipReason,
                     action,
                     createdAt,
                     cause
@@ -411,22 +447,119 @@ public class Database {
         }
     }
 
+    public CompletableFuture<Void> createRollbackAudit(RollbackAuditStart audit) {
+        if (!isOpen()) {
+            return CompletableFuture.failedFuture(new SQLException("Database not available."));
+        }
+
+        return CompletableFuture.runAsync(() -> {
+            String sql = """
+                    INSERT INTO rollback_audits (
+                        id, executor_uuid, executor_name, target_uuid, target_name,
+                        world, center_x, center_y, center_z, radius, from_time,
+                        preview_events, preview_unsupported, started_at, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """;
+            try (PreparedStatement ps = writeConnection.prepareStatement(sql)) {
+                ps.setString(1, audit.id());
+                ps.setString(2, audit.executorUuid());
+                ps.setString(3, audit.executorName());
+                ps.setString(4, audit.targetUuid());
+                ps.setString(5, audit.targetName());
+                ps.setString(6, audit.worldName());
+                ps.setInt(7, audit.centerX());
+                ps.setInt(8, audit.centerY());
+                ps.setInt(9, audit.centerZ());
+                ps.setInt(10, audit.radius());
+                ps.setLong(11, audit.fromTime());
+                ps.setInt(12, audit.previewEvents());
+                ps.setInt(13, audit.previewUnsupported());
+                ps.setLong(14, audit.startedAt());
+                ps.setString(15, RollbackAuditStatus.RUNNING.name());
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                throw new CompletionException(e);
+            }
+        }, dbExecutor);
+    }
+
+    public void finishRollbackAudit(
+            String auditId,
+            RollbackAuditStatus status,
+            int affected,
+            int skipped,
+            String details
+    ) {
+        if (status == RollbackAuditStatus.RUNNING) {
+            throw new IllegalArgumentException("A completed audit cannot use RUNNING status.");
+        }
+        if (!isOpen()) {
+            return;
+        }
+
+        String safeDetails = details == null
+                ? null
+                : details.substring(0, Math.min(details.length(), 2000));
+        try {
+            dbExecutor.execute(() -> {
+                String sql = """
+                        UPDATE rollback_audits
+                        SET completed_at = ?, status = ?, affected = ?, skipped = ?, details = ?
+                        WHERE id = ? AND status = ?;
+                        """;
+                try (PreparedStatement ps = writeConnection.prepareStatement(sql)) {
+                    ps.setLong(1, System.currentTimeMillis());
+                    ps.setString(2, status.name());
+                    ps.setInt(3, affected);
+                    ps.setInt(4, skipped);
+                    ps.setString(5, safeDetails);
+                    ps.setString(6, auditId);
+                    ps.setString(7, RollbackAuditStatus.RUNNING.name());
+                    if (ps.executeUpdate() != 1) {
+                        plugin.getLogger().warning("Rollback audit was already finalized: " + auditId);
+                    }
+                } catch (SQLException e) {
+                    plugin.getLogger().severe("Failed to finalize rollback audit: " + e.getMessage());
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            plugin.getLogger().severe("Database closed before rollback audit could be finalized: " + auditId);
+        }
+    }
+
     private void validateSchema() throws SQLException {
         boolean hasBlockData = false;
+        boolean hasRollbackSkipReason = false;
         try (Statement stmt = writeConnection.createStatement();
              ResultSet columns = stmt.executeQuery("PRAGMA table_info(events);")) {
             while (columns.next()) {
                 if ("block_data".equals(columns.getString("name"))) {
                     hasBlockData = true;
-                    break;
+                } else if ("rollback_skip_reason".equals(columns.getString("name"))) {
+                    hasRollbackSkipReason = true;
                 }
             }
         }
 
-        if (!hasBlockData) {
+        if (!hasBlockData || !hasRollbackSkipReason) {
             throw new SQLException(
                     "Unsupported pre-release database schema. Remove blocklog.sqlite and restart."
             );
+        }
+    }
+
+    private void failInterruptedRollbackAudits() throws SQLException {
+        String sql = """
+                UPDATE rollback_audits
+                SET completed_at = ?, status = ?, details = ?
+                WHERE status = ?;
+                """;
+        try (PreparedStatement ps = writeConnection.prepareStatement(sql)) {
+            ps.setLong(1, System.currentTimeMillis());
+            ps.setString(2, RollbackAuditStatus.FAILED.name());
+            ps.setString(3, "Server stopped before rollback completion");
+            ps.setString(4, RollbackAuditStatus.RUNNING.name());
+            ps.executeUpdate();
         }
     }
 
@@ -538,12 +671,13 @@ public class Database {
                 eventsInsertPs.setInt(7, a.z());
                 eventsInsertPs.setString(8, a.blockType());
                 eventsInsertPs.setString(9, a.blockData());
-                eventsInsertPs.setInt(10, a.action().getCode());
-                eventsInsertPs.setLong(11, a.createdAt());
+                eventsInsertPs.setString(10, a.rollbackSkipReason());
+                eventsInsertPs.setInt(11, a.action().getCode());
+                eventsInsertPs.setLong(12, a.createdAt());
                 if (a.cause() != null) {
-                    eventsInsertPs.setInt(12, a.cause().getCode());
+                    eventsInsertPs.setInt(13, a.cause().getCode());
                 } else {
-                    eventsInsertPs.setNull(12, java.sql.Types.INTEGER);
+                    eventsInsertPs.setNull(13, java.sql.Types.INTEGER);
                 }
                 eventsInsertPs.addBatch();
             }
@@ -668,6 +802,7 @@ public class Database {
             int z,
             String blockType,
             String blockData,
+            String rollbackSkipReason,
             BlockActionType action,
             long createdAt,
             BlockActionCause cause
@@ -776,11 +911,14 @@ public class Database {
         }
 
         String sql = """
-                SELECT x,
+                SELECT id,
+                       x,
                        y,
                        z,
                        block_type,
                        block_data,
+                       rollback_skip_reason,
+                       player_uuid,
                        action,
                        created_at
                 FROM events
@@ -825,22 +963,28 @@ public class Database {
 
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
+                    String id = rs.getString("id");
                     int x = rs.getInt("x");
                     int y = rs.getInt("y");
                     int z = rs.getInt("z");
                     String blockType = rs.getString("block_type");
                     String blockData = rs.getString("block_data");
+                    String rollbackSkipReason = rs.getString("rollback_skip_reason");
+                    String playerUuid = rs.getString("player_uuid");
                     int actionCode = rs.getInt("action");
                     long createdAt = rs.getLong("created_at");
 
                     BlockActionType action = BlockActionType.fromCode(actionCode);
 
                     result.add(new RollbackEntry(
+                            id,
                             x,
                             y,
                             z,
                             blockType,
                             blockData,
+                            rollbackSkipReason,
+                            playerUuid,
                             action,
                             createdAt
                     ));
@@ -856,13 +1000,41 @@ public class Database {
     }
 
     public record RollbackEntry(
+            String id,
             int x,
             int y,
             int z,
             String blockType,
             String blockData,
+            String rollbackSkipReason,
+            String playerUuid,
             BlockActionType action,
             long createdAt
     ) {}
+
+    public record RollbackAuditStart(
+            String id,
+            String executorUuid,
+            String executorName,
+            String targetUuid,
+            String targetName,
+            String worldName,
+            int centerX,
+            int centerY,
+            int centerZ,
+            int radius,
+            long fromTime,
+            int previewEvents,
+            int previewUnsupported,
+            long startedAt
+    ) {}
+
+    public enum RollbackAuditStatus {
+        RUNNING,
+        COMPLETED,
+        CANCELLED,
+        FAILED
+    }
+
     public record BlockLogEntry(String playerName, String blockType, BlockActionType action, long createdAt, BlockActionCause cause) {}
 }

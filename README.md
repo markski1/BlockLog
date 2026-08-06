@@ -6,7 +6,7 @@ Lightweight block interaction logging plugin.
 
 A download is not yet available as the plugin remains in experimental state.
 
-You may build and run it yourself, no guarantee of support for the current sqlite schema in future versions is guaranteed.
+You may build and run it yourself, but no guarantee of support for the current sqlite schema in future versions is guaranteed.
 
 ### Motivation
 
@@ -22,7 +22,7 @@ To make a simple and lightweight plugin that doesn't implement an entire suite o
 - Logs block transactions.
 - Logging of block interaction, ie. opening and closing gates, chests.
 - Inspection command with `/bkl i`.
-- Rollback with `/bkl rollback` command. Experimental.
+- Rollback command has preview, before confirmation.
 - Lightweight and straightforward. Should cause no performance degradation or blockage of main thread.
 
 ### User-facing TODO
@@ -48,6 +48,24 @@ To make a simple and lightweight plugin that doesn't implement an entire suite o
 - Drag the .jar into your plugins folder.
 - Set up permissions if using those (`blocklog.use`, `blocklog.inspect`, `blocklog.rollback`)
 - Done
+
+### Rollback
+
+1. Run `/bkl rollback preview <playerName> <hours> <radius>` from the center of the area.
+2. Review the event, chunk, and unsupported-block counts.
+3. Run `/bkl rollback confirm <token>` within 60 seconds.
+
+Use `/bkl rollback status` for progress and `/bkl rollback cancel` to stop your rollback. Tile entities and multi-block structures are reported and skipped because restoring them without complete state could corrupt or duplicate data. Rollback database queries and chunk loading run asynchronously; world changes are time-budgeted on the server thread.
+
+### Build security
+
+The build uses exact direct dependency versions, rejects dynamic or changing versions, supports Gradle dependency locking, treats Java compiler warnings as errors, produces reproducible jars, and generates a CycloneDX SBOM at `build/reports/bom.cdx.json`. CI runs on Java 25, validates the Gradle wrapper, executes checks, and scans dependencies with OSV. GitHub Actions are pinned to immutable commits, and Dependabot waits at least three days before proposing non-security updates.
+
+Dependency lock and verification metadata must be regenerated through the repository's required safe package wrapper whenever dependencies change:
+
+```text
+sfw ./gradlew --write-locks --write-verification-metadata sha256 help
+```
 
 ### Contribution
 

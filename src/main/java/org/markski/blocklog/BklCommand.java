@@ -10,8 +10,20 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 
+import java.security.SecureRandom;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
@@ -23,9 +35,16 @@ public class BklCommand implements CommandExecutor {
     private static final int MAX_ROLLBACK_ENTRIES = 50000;
     private static final int ROLLBACK_BATCH_SIZE = 64;
     private static final long ROLLBACK_TICK_BUDGET_NANOS = 2_000_000L;
+    private static final long PREVIEW_EXPIRY_MILLIS = 60_000L;
+    private static final long PROGRESS_INTERVAL_NANOS = 5_000_000_000L;
 
     private final Main plugin;
+    private final SecureRandom secureRandom = new SecureRandom();
     private final AtomicBoolean rollbackInProgress = new AtomicBoolean();
+    private final Map<UUID, PendingRollback> pendingRollbacks = new HashMap<>();
+    private final Set<UUID> previewsInFlight = new HashSet<>();
+    private final Set<UUID> cancelledPreviews = new HashSet<>();
+    private RollbackTask activeRollback;
 
     public BklCommand(Main plugin) {
         this.plugin = plugin;
@@ -41,30 +60,35 @@ public class BklCommand implements CommandExecutor {
         if (!command.getName().equalsIgnoreCase("bkl")) {
             return false;
         }
-
         if (!(sender instanceof Player executor)) {
             sender.sendMessage("This command can only be used by a player.");
             return true;
         }
-
         if (args.length == 0) {
             Database db = plugin.getDatabase();
-            sender.sendMessage(db != null && db.isOpen()
+            executor.sendMessage(db != null && db.isOpen()
                     ? "BlockLog is loaded."
                     : "BlockLog is still initializing.");
             return true;
         }
-
         if (args[0].equalsIgnoreCase("i")) {
             return toggleInspect(executor);
         }
-
         if (args[0].equalsIgnoreCase("rollback")) {
-            return startRollback(executor, args);
+            return handleRollback(executor, args);
         }
 
-        sender.sendMessage("Usage: /bkl ['i' for inspect, 'rollback' for rollback.]");
+        sendUsage(executor);
         return true;
+    }
+
+    public void shutdown() {
+        pendingRollbacks.clear();
+        previewsInFlight.clear();
+        cancelledPreviews.clear();
+        if (activeRollback != null) {
+            activeRollback.abortForShutdown();
+        }
     }
 
     private boolean toggleInspect(Player executor) {
@@ -81,120 +105,404 @@ public class BklCommand implements CommandExecutor {
         db.requestFlush();
 
         boolean nowInspecting = plugin.toggleInspect(executor.getUniqueId());
-        if (nowInspecting) {
-            executor.sendMessage("\u00A7aBlockLog inspect mode enabled\u00A7f. Hit or place blocks to inspect them.");
-        } else {
-            executor.sendMessage("\u00A7cBlockLog inspect mode disabled\u00A7f.");
-        }
+        executor.sendMessage(nowInspecting
+                ? "\u00A7aBlockLog inspect mode enabled\u00A7f. Hit or place blocks to inspect them."
+                : "\u00A7cBlockLog inspect mode disabled\u00A7f.");
         return true;
     }
 
-    private boolean startRollback(Player executor, String[] args) {
+    private boolean handleRollback(Player executor, String[] args) {
         if (!executor.hasPermission("blocklog.rollback")) {
             executor.sendMessage("\u00A7cYou don't have permission to use /bkl rollback.");
             return true;
         }
-
-        if (args.length < 4) {
-            executor.sendMessage("\u00A7cUsage: /bkl rollback <playerName> <hours> <radius>");
+        if (args.length < 2) {
+            sendRollbackUsage(executor);
             return true;
         }
 
-        String targetPlayerName = args[1];
-        if (!PLAYER_NAME_PATTERN.matcher(targetPlayerName).matches()) {
-            executor.sendMessage("\u00A7cPlayer name must contain 1-16 letters, numbers, or underscores.");
+        return switch (args[1].toLowerCase()) {
+            case "preview" -> previewRollback(executor, args);
+            case "confirm" -> confirmRollback(executor, args);
+            case "cancel" -> cancelRollback(executor);
+            case "status" -> rollbackStatus(executor);
+            default -> {
+                sendRollbackUsage(executor);
+                yield true;
+            }
+        };
+    }
+
+    private boolean previewRollback(Player executor, String[] args) {
+        if (args.length != 5) {
+            executor.sendMessage("\u00A7cUsage: /bkl rollback preview <playerName> <hours> <radius>");
+            return true;
+        }
+        if (!previewsInFlight.add(executor.getUniqueId())) {
+            executor.sendMessage("\u00A7cA rollback preview is already running.");
             return true;
         }
 
-        int hours;
-        int radius;
-        try {
-            hours = Integer.parseInt(args[2]);
-            radius = Integer.parseInt(args[3]);
-        } catch (NumberFormatException e) {
-            executor.sendMessage("\u00A7cHours and radius must be numbers.");
-            return true;
-        }
-
-        if (hours <= 0 || radius <= 0) {
-            executor.sendMessage("\u00A7cHours and radius must be greater than 0.");
-            return true;
-        }
-        if (hours > MAX_ROLLBACK_HOURS || radius > MAX_ROLLBACK_RADIUS) {
-            executor.sendMessage("\u00A7cMaximum rollback scope is " + MAX_ROLLBACK_HOURS
-                    + " hours and radius " + MAX_ROLLBACK_RADIUS + ".");
+        RollbackRequest request = parseRequest(executor, args[2], args[3], args[4]);
+        if (request == null) {
+            previewsInFlight.remove(executor.getUniqueId());
             return true;
         }
 
         Database db = plugin.getDatabase();
         if (db == null || !db.isOpen()) {
+            previewsInFlight.remove(executor.getUniqueId());
             executor.sendMessage("\u00A7cDatabase not available.");
+            return true;
+        }
+
+        pendingRollbacks.remove(executor.getUniqueId());
+        cancelledPreviews.remove(executor.getUniqueId());
+        executor.sendMessage("\u00A7eCalculating rollback preview...");
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try {
+                db.flushPendingActionsNow();
+                List<Database.RollbackEntry> entries = loadEntries(db, request);
+                Bukkit.getScheduler().runTask(plugin, () -> finishPreview(executor, request, entries));
+            } catch (SQLException | IllegalArgumentException e) {
+                plugin.getLogger().severe("Rollback preview failed: " + e.getMessage());
+                finishPreviewFailure(executor, "\u00A7cRollback preview failed. Check the console.");
+            }
+        });
+        return true;
+    }
+
+    private void finishPreview(
+            Player executor,
+            RollbackRequest request,
+            List<Database.RollbackEntry> entries
+    ) {
+        UUID executorId = executor.getUniqueId();
+        previewsInFlight.remove(executorId);
+        if (cancelledPreviews.remove(executorId) || !executor.isOnline()) {
+            return;
+        }
+        if (entries.size() > MAX_ROLLBACK_ENTRIES) {
+            executor.sendMessage("\u00A7cPreview matched more than " + MAX_ROLLBACK_ENTRIES
+                    + " events. Use a smaller time window or radius.");
+            return;
+        }
+        if (entries.isEmpty()) {
+            executor.sendMessage("\u00A77No actions found in that rollback scope.");
+            return;
+        }
+
+        RollbackSummary summary = summarize(entries);
+        if (summary.supportedEvents() == 0) {
+            executor.sendMessage("\u00A7cAll matching events are unsupported and will be skipped.");
+            executor.sendMessage("\u00A77Unsupported: " + formatReasons(summary.unsupportedReasons()));
+            return;
+        }
+        String token = createToken();
+        PendingRollback pending = new PendingRollback(
+                request,
+                summary,
+                token,
+                System.currentTimeMillis() + PREVIEW_EXPIRY_MILLIS
+        );
+        pendingRollbacks.put(executorId, pending);
+        Bukkit.getScheduler().runTaskLater(
+                plugin,
+                () -> pendingRollbacks.remove(executorId, pending),
+                PREVIEW_EXPIRY_MILLIS / 50L
+        );
+
+        executor.sendMessage("\u00A7eRollback preview: \u00A7b" + summary.totalEvents()
+                + "\u00A7e events across \u00A7b" + summary.chunkCount() + "\u00A7e chunks.");
+        executor.sendMessage("\u00A7aSupported: " + summary.supportedEvents()
+                + " \u00A77| \u00A7cUnsupported/skipped: " + summary.unsupportedEvents());
+        if (!summary.unsupportedReasons().isEmpty()) {
+            executor.sendMessage("\u00A77Unsupported: " + formatReasons(summary.unsupportedReasons()));
+        }
+        executor.sendMessage("\u00A7eConfirm within 60 seconds using \u00A7f/bkl rollback confirm " + token);
+    }
+
+    private void finishPreviewFailure(Player executor, String message) {
+        if (!plugin.isEnabled()) {
+            return;
+        }
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            previewsInFlight.remove(executor.getUniqueId());
+            if (executor.isOnline()) {
+                executor.sendMessage(message);
+            }
+        });
+    }
+
+    private boolean confirmRollback(Player executor, String[] args) {
+        if (args.length != 3) {
+            executor.sendMessage("\u00A7cUsage: /bkl rollback confirm <token>");
+            return true;
+        }
+
+        UUID executorId = executor.getUniqueId();
+        PendingRollback pending = pendingRollbacks.get(executorId);
+        if (pending == null
+                || pending.expiresAt() < System.currentTimeMillis()
+                || !pending.token().equalsIgnoreCase(args[2])) {
+            pendingRollbacks.remove(executorId);
+            executor.sendMessage("\u00A7cNo matching rollback preview exists, or its token expired.");
             return true;
         }
         if (!rollbackInProgress.compareAndSet(false, true)) {
             executor.sendMessage("\u00A7cAnother rollback is already running.");
             return true;
         }
+        pendingRollbacks.remove(executorId);
+
+        Database db = plugin.getDatabase();
+        if (db == null || !db.isOpen()) {
+            rollbackInProgress.set(false);
+            executor.sendMessage("\u00A7cDatabase not available.");
+            return true;
+        }
+
+        executor.sendMessage("\u00A7eRevalidating rollback scope...");
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try {
+                db.flushPendingActionsNow();
+                List<Database.RollbackEntry> entries = loadEntries(db, pending.request());
+                if (entries.isEmpty() || entries.size() > MAX_ROLLBACK_ENTRIES) {
+                    finishPreparation(executor, "\u00A7cRollback scope is now empty or too large. Preview it again.");
+                    return;
+                }
+
+                RollbackSummary actual = summarize(entries);
+                if (!actual.targetUuid().equals(pending.summary().targetUuid())
+                        || !actual.fingerprint().equals(pending.summary().fingerprint())) {
+                    finishPreparation(executor, "\u00A7cThe rollback scope changed. Preview it again.");
+                    return;
+                }
+
+                String auditId = UUID.randomUUID().toString();
+                Database.RollbackAuditStart audit = createAudit(executor, pending, actual, auditId);
+                db.createRollbackAudit(audit).whenComplete((ignored, error) -> {
+                    if (error != null) {
+                        plugin.getLogger().severe("Failed to create rollback audit: " + error.getMessage());
+                        finishPreparation(executor, "\u00A7cRollback audit could not be persisted; no blocks were changed.");
+                        return;
+                    }
+                    if (!plugin.isEnabled()) {
+                        db.finishRollbackAudit(
+                                auditId,
+                                Database.RollbackAuditStatus.CANCELLED,
+                                0,
+                                0,
+                                "Plugin disabled before execution"
+                        );
+                        rollbackInProgress.set(false);
+                        return;
+                    }
+                    Bukkit.getScheduler().runTask(plugin, () -> beginRollback(executor, pending, entries, auditId));
+                });
+            } catch (SQLException | IllegalArgumentException e) {
+                plugin.getLogger().severe("Rollback preparation failed: " + e.getMessage());
+                finishPreparation(executor, "\u00A7cRollback preparation failed. Check the console.");
+            }
+        });
+        return true;
+    }
+
+    private void beginRollback(
+            Player executor,
+            PendingRollback pending,
+            List<Database.RollbackEntry> entries,
+            String auditId
+    ) {
+        World world = Bukkit.getWorld(pending.request().worldName());
+        if (world == null || !executor.isOnline()) {
+            plugin.getDatabase().finishRollbackAudit(
+                    auditId,
+                    Database.RollbackAuditStatus.CANCELLED,
+                    0,
+                    0,
+                    "World unavailable or executor disconnected"
+            );
+            rollbackInProgress.set(false);
+            return;
+        }
+
+        activeRollback = new RollbackTask(executor, world, entries, auditId);
+        executor.sendMessage("\u00A7eRollback started. Use \u00A7f/bkl rollback cancel \u00A7eto stop it.");
+        activeRollback.run();
+    }
+
+    private boolean cancelRollback(Player executor) {
+        UUID executorId = executor.getUniqueId();
+        boolean cancelled = pendingRollbacks.remove(executorId) != null;
+        if (previewsInFlight.contains(executorId)) {
+            cancelledPreviews.add(executorId);
+            cancelled = true;
+        }
+        if (activeRollback != null && activeRollback.executorId().equals(executorId)) {
+            activeRollback.requestCancel();
+            cancelled = true;
+        }
+
+        executor.sendMessage(cancelled
+                ? "\u00A7eRollback preview or execution cancellation requested."
+                : "\u00A77You have no rollback to cancel.");
+        return true;
+    }
+
+    private boolean rollbackStatus(Player executor) {
+        if (activeRollback != null) {
+            executor.sendMessage(activeRollback.progressMessage());
+            return true;
+        }
+        PendingRollback pending = pendingRollbacks.get(executor.getUniqueId());
+        if (pending != null && pending.expiresAt() >= System.currentTimeMillis()) {
+            executor.sendMessage("\u00A7eA preview is awaiting confirmation for "
+                    + Math.max(0, (pending.expiresAt() - System.currentTimeMillis()) / 1000)
+                    + " more seconds.");
+            return true;
+        }
+        executor.sendMessage("\u00A77No rollback is active.");
+        return true;
+    }
+
+    private RollbackRequest parseRequest(Player executor, String targetName, String hoursArg, String radiusArg) {
+        if (!PLAYER_NAME_PATTERN.matcher(targetName).matches()) {
+            executor.sendMessage("\u00A7cPlayer name must contain 1-16 letters, numbers, or underscores.");
+            return null;
+        }
+
+        int hours;
+        int radius;
+        try {
+            hours = Integer.parseInt(hoursArg);
+            radius = Integer.parseInt(radiusArg);
+        } catch (NumberFormatException e) {
+            executor.sendMessage("\u00A7cHours and radius must be numbers.");
+            return null;
+        }
+        if (hours <= 0 || radius <= 0) {
+            executor.sendMessage("\u00A7cHours and radius must be greater than 0.");
+            return null;
+        }
+        if (hours > MAX_ROLLBACK_HOURS || radius > MAX_ROLLBACK_RADIUS) {
+            executor.sendMessage("\u00A7cMaximum rollback scope is " + MAX_ROLLBACK_HOURS
+                    + " hours and radius " + MAX_ROLLBACK_RADIUS + ".");
+            return null;
+        }
 
         World world = executor.getWorld();
         int centerX = executor.getLocation().getBlockX();
         int centerY = executor.getLocation().getBlockY();
         int centerZ = executor.getLocation().getBlockZ();
-        long fromTime = System.currentTimeMillis() - hours * 60L * 60L * 1000L;
-
-        int minX = centerX - radius;
-        int maxX = centerX + radius;
-        int minY = Math.max(world.getMinHeight(), centerY - radius);
-        int maxY = Math.min(world.getMaxHeight() - 1, centerY + radius);
-        int minZ = centerZ - radius;
-        int maxZ = centerZ + radius;
-
-        executor.sendMessage("\u00A7eStarting rollback for \u00A7b" + targetPlayerName
-                + "\u00A7e, last \u00A7b" + hours + "\u00A7eh, radius \u00A7b" + radius + "\u00A7e...");
-
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            db.flushPendingActionsNow();
-
-            List<Database.RollbackEntry> entries;
-            try {
-                entries = db.getActionsForRollback(
-                        targetPlayerName,
-                        world.getName(),
-                        fromTime,
-                        minX,
-                        maxX,
-                        minY,
-                        maxY,
-                        minZ,
-                        maxZ,
-                        MAX_ROLLBACK_ENTRIES + 1
-                );
-            } catch (SQLException | IllegalArgumentException e) {
-                plugin.getLogger().severe("Rollback query failed: " + e.getMessage());
-                finishRollback(executor, "\u00A7cRollback failed, check console.");
-                return;
-            }
-
-            if (entries.isEmpty()) {
-                finishRollback(executor, "\u00A77No actions found to rollback.");
-                return;
-            }
-            if (entries.size() > MAX_ROLLBACK_ENTRIES) {
-                finishRollback(executor, "\u00A7cRollback matched more than " + MAX_ROLLBACK_ENTRIES
-                        + " events. Use a smaller time window or radius.");
-                return;
-            }
-
-            Bukkit.getScheduler().runTask(
-                    plugin,
-                    new RollbackTask(executor, world, centerX, centerY, centerZ, radius, entries)
-            );
-        });
-
-        return true;
+        return new RollbackRequest(
+                targetName,
+                world.getName(),
+                centerX,
+                centerY,
+                centerZ,
+                radius,
+                System.currentTimeMillis() - hours * 60L * 60L * 1000L,
+                centerX - radius,
+                centerX + radius,
+                Math.max(world.getMinHeight(), centerY - radius),
+                Math.min(world.getMaxHeight() - 1, centerY + radius),
+                centerZ - radius,
+                centerZ + radius
+        );
     }
 
-    private void finishRollback(Player executor, String message) {
+    private List<Database.RollbackEntry> loadEntries(Database db, RollbackRequest request) throws SQLException {
+        List<Database.RollbackEntry> candidates = db.getActionsForRollback(
+                request.targetName(),
+                request.worldName(),
+                request.fromTime(),
+                request.minX(),
+                request.maxX(),
+                request.minY(),
+                request.maxY(),
+                request.minZ(),
+                request.maxZ(),
+                MAX_ROLLBACK_ENTRIES + 1
+        );
+        if (candidates.size() > MAX_ROLLBACK_ENTRIES) {
+            throw new IllegalArgumentException("Rollback bounding box matched too many events.");
+        }
+        List<Database.RollbackEntry> entries = new ArrayList<>(candidates.size());
+        long radiusSquared = (long) request.radius() * request.radius();
+        for (Database.RollbackEntry entry : candidates) {
+            long dx = (long) entry.x() - request.centerX();
+            long dy = (long) entry.y() - request.centerY();
+            long dz = (long) entry.z() - request.centerZ();
+            if (dx * dx + dy * dy + dz * dz <= radiusSquared) {
+                entries.add(entry);
+            }
+        }
+        return entries;
+    }
+
+    private static RollbackSummary summarize(List<Database.RollbackEntry> entries) {
+        Set<Long> chunks = new HashSet<>();
+        Map<String, Integer> reasons = new TreeMap<>();
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
+        for (Database.RollbackEntry entry : entries) {
+            digest.update(entry.id().getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) 0);
+            long chunkKey = ((long) (entry.x() >> 4) << 32) ^ ((entry.z() >> 4) & 0xffffffffL);
+            chunks.add(chunkKey);
+            if (entry.rollbackSkipReason() != null) {
+                reasons.merge(entry.rollbackSkipReason(), 1, Integer::sum);
+            }
+        }
+        int unsupported = reasons.values().stream().mapToInt(Integer::intValue).sum();
+        return new RollbackSummary(
+                entries.size(),
+                entries.size() - unsupported,
+                unsupported,
+                chunks.size(),
+                Map.copyOf(reasons),
+                entries.getFirst().playerUuid(),
+                HexFormat.of().formatHex(digest.digest())
+        );
+    }
+
+    private Database.RollbackAuditStart createAudit(
+            Player executor,
+            PendingRollback pending,
+            RollbackSummary actual,
+            String auditId
+    ) {
+        RollbackRequest request = pending.request();
+        return new Database.RollbackAuditStart(
+                auditId,
+                executor.getUniqueId().toString(),
+                executor.getName(),
+                actual.targetUuid(),
+                request.targetName(),
+                request.worldName(),
+                request.centerX(),
+                request.centerY(),
+                request.centerZ(),
+                request.radius(),
+                request.fromTime(),
+                pending.summary().totalEvents(),
+                pending.summary().unsupportedEvents(),
+                System.currentTimeMillis()
+        );
+    }
+
+    private String createToken() {
+        byte[] bytes = new byte[4];
+        secureRandom.nextBytes(bytes);
+        return HexFormat.of().withUpperCase().formatHex(bytes);
+    }
+
+    private void finishPreparation(Player executor, String message) {
         rollbackInProgress.set(false);
         if (!plugin.isEnabled()) {
             return;
@@ -206,85 +514,115 @@ public class BklCommand implements CommandExecutor {
         });
     }
 
+    private static String formatReasons(Map<String, Integer> reasons) {
+        List<String> values = new ArrayList<>();
+        reasons.forEach((reason, count) -> values.add(reason + "=" + count));
+        return String.join(", ", values);
+    }
+
+    private static void sendUsage(Player player) {
+        player.sendMessage("Usage: /bkl i | /bkl rollback <preview|confirm|cancel|status>");
+    }
+
+    private static void sendRollbackUsage(Player player) {
+        player.sendMessage("\u00A7cUsage: /bkl rollback preview <playerName> <hours> <radius>");
+        player.sendMessage("\u00A7c       /bkl rollback confirm <token> | cancel | status");
+    }
+
     private final class RollbackTask implements Runnable {
         private final Player executor;
         private final World world;
-        private final int centerX;
-        private final int centerY;
-        private final int centerZ;
-        private final long radiusSquared;
         private final List<Database.RollbackEntry> entries;
+        private final String auditId;
         private int index;
         private int affected;
         private int skipped;
+        private int unsupported;
+        private boolean cancelRequested;
+        private boolean finished;
+        private long lastProgressNanos = System.nanoTime();
 
         private RollbackTask(
                 Player executor,
                 World world,
-                int centerX,
-                int centerY,
-                int centerZ,
-                int radius,
-                List<Database.RollbackEntry> entries
+                List<Database.RollbackEntry> entries,
+                String auditId
         ) {
             this.executor = executor;
             this.world = world;
-            this.centerX = centerX;
-            this.centerY = centerY;
-            this.centerZ = centerZ;
-            this.radiusSquared = (long) radius * radius;
             this.entries = entries;
+            this.auditId = auditId;
+        }
+
+        private UUID executorId() {
+            return executor.getUniqueId();
+        }
+
+        private void requestCancel() {
+            cancelRequested = true;
+        }
+
+        private String progressMessage() {
+            return "\u00A7eRollback progress: \u00A7b" + index + "/" + entries.size()
+                    + "\u00A7e processed, \u00A7a" + affected + " changed, \u00A77" + skipped + " skipped.";
         }
 
         @Override
         public void run() {
-            if (!executor.isOnline()) {
-                rollbackInProgress.set(false);
+            if (finished) {
+                return;
+            }
+            if (cancelRequested || !executor.isOnline()) {
+                finish(Database.RollbackAuditStatus.CANCELLED, "Rollback cancelled.", true);
                 return;
             }
 
-            long deadline = System.nanoTime() + ROLLBACK_TICK_BUDGET_NANOS;
-            int processed = 0;
-            while (index < entries.size()
-                    && processed < ROLLBACK_BATCH_SIZE
-                    && System.nanoTime() < deadline) {
-                Database.RollbackEntry entry = entries.get(index);
+            try {
+                long deadline = System.nanoTime() + ROLLBACK_TICK_BUDGET_NANOS;
+                int processed = 0;
+                while (index < entries.size()
+                        && processed < ROLLBACK_BATCH_SIZE
+                        && System.nanoTime() < deadline) {
+                    Database.RollbackEntry entry = entries.get(index);
+                    if (entry.rollbackSkipReason() != null) {
+                        unsupported++;
+                        skipped++;
+                        index++;
+                        processed++;
+                        continue;
+                    }
 
-                long dx = (long) entry.x() - centerX;
-                long dy = (long) entry.y() - centerY;
-                long dz = (long) entry.z() - centerZ;
-                if (dx * dx + dy * dy + dz * dz > radiusSquared) {
+                    int chunkX = entry.x() >> 4;
+                    int chunkZ = entry.z() >> 4;
+                    if (!world.isChunkLoaded(chunkX, chunkZ)) {
+                        loadChunkAndResume(chunkX, chunkZ);
+                        return;
+                    }
+
+                    rollback(entry);
                     index++;
                     processed++;
-                    continue;
                 }
 
-                int chunkX = entry.x() >> 4;
-                int chunkZ = entry.z() >> 4;
-                if (!world.isChunkLoaded(chunkX, chunkZ)) {
-                    loadChunkAndResume(chunkX, chunkZ);
-                    return;
+                long now = System.nanoTime();
+                if (now - lastProgressNanos >= PROGRESS_INTERVAL_NANOS) {
+                    executor.sendMessage(progressMessage());
+                    lastProgressNanos = now;
                 }
-
-                rollback(entry);
-                index++;
-                processed++;
+                if (index >= entries.size()) {
+                    finish(Database.RollbackAuditStatus.COMPLETED, "Rollback complete.", true);
+                } else {
+                    Bukkit.getScheduler().runTask(plugin, this);
+                }
+            } catch (RuntimeException e) {
+                plugin.getLogger().severe("Rollback execution failed: " + e.getMessage());
+                finish(Database.RollbackAuditStatus.FAILED, "Rollback failed. Check the console.", true);
             }
-
-            if (index >= entries.size()) {
-                rollbackInProgress.set(false);
-                executor.sendMessage("\u00A7aRollback complete. \u00A7b" + affected
-                        + "\u00A7a blocks changed, \u00A77" + skipped + " skipped.");
-                return;
-            }
-
-            Bukkit.getScheduler().runTask(plugin, this);
         }
 
         private void loadChunkAndResume(int chunkX, int chunkZ) {
             world.getChunkAtAsync(chunkX, chunkZ, false).whenComplete((chunk, error) -> {
                 if (!plugin.isEnabled()) {
-                    rollbackInProgress.set(false);
                     return;
                 }
                 Bukkit.getScheduler().runTask(plugin, () -> {
@@ -330,5 +668,57 @@ public class BklCommand implements CommandExecutor {
                 }
             }
         }
+
+        private void abortForShutdown() {
+            finish(Database.RollbackAuditStatus.CANCELLED, "Plugin disabled.", false);
+        }
+
+        private void finish(Database.RollbackAuditStatus status, String message, boolean notifyExecutor) {
+            if (finished) {
+                return;
+            }
+            finished = true;
+            String details = "processed=" + index + ";unsupported=" + unsupported;
+            plugin.getDatabase().finishRollbackAudit(auditId, status, affected, skipped, details);
+            activeRollback = null;
+            rollbackInProgress.set(false);
+            if (notifyExecutor && executor.isOnline()) {
+                executor.sendMessage("\u00A7e" + message + " \u00A7a" + affected
+                        + " changed, \u00A77" + skipped + " skipped (" + unsupported + " unsupported).");
+            }
+        }
     }
+
+    private record RollbackRequest(
+            String targetName,
+            String worldName,
+            int centerX,
+            int centerY,
+            int centerZ,
+            int radius,
+            long fromTime,
+            int minX,
+            int maxX,
+            int minY,
+            int maxY,
+            int minZ,
+            int maxZ
+    ) {}
+
+    private record RollbackSummary(
+            int totalEvents,
+            int supportedEvents,
+            int unsupportedEvents,
+            int chunkCount,
+            Map<String, Integer> unsupportedReasons,
+            String targetUuid,
+            String fingerprint
+    ) {}
+
+    private record PendingRollback(
+            RollbackRequest request,
+            RollbackSummary summary,
+            String token,
+            long expiresAt
+    ) {}
 }

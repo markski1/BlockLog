@@ -1,1 +1,15 @@
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        mavenCentral()
+        maven {
+            name = 'paper'
+            url = uri('https://repo.papermc.io/repository/maven-public/')
+            content {
+                includeGroup('io.papermc.paper')
+            }
+        }
+    }
+}
+
 rootProject.name = 'BlockLog'

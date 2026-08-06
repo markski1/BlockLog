@@ -11,14 +11,16 @@ import java.util.logging.Level;
 public class Main extends JavaPlugin {
 
     private volatile Database database;
+    private BklCommand commandExecutor;
     private final Set<UUID> inspectingPlayers =
             ConcurrentHashMap.newKeySet();
 
     @Override
     public void onEnable() {
         database = new Database(this);
+        commandExecutor = new BklCommand(this);
         Objects.requireNonNull(getCommand("bkl"), "Command 'bkl' not defined in plugin.yml")
-                .setExecutor(new BklCommand(this));
+                .setExecutor(commandExecutor);
 
         database.openAsync().whenComplete((ignored, error) -> {
             if (!isEnabled()) {
@@ -42,6 +44,9 @@ public class Main extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        if (commandExecutor != null) {
+            commandExecutor.shutdown();
+        }
         if (database != null) {
             database.close();
         }

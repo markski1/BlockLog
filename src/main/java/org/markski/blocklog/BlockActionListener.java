@@ -4,6 +4,8 @@ import org.bukkit.Material;
 import org.bukkit.Tag;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
+import org.bukkit.block.TileState;
+import org.bukkit.block.data.Bisected;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -278,7 +280,8 @@ public class BlockActionListener implements Listener {
                     block.getWorld().getName(),
                     block.getX(), block.getY(), block.getZ(),
                     block.getType().name(),
-                    block.getBlockData().getAsString()
+                    block.getBlockData().getAsString(),
+                    rollbackSkipReason(block)
             ));
         }
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
@@ -295,6 +298,7 @@ public class BlockActionListener implements Listener {
                         data.x(), data.y(), data.z(),
                         data.blockType(),
                         data.blockData(),
+                        data.rollbackSkipReason(),
                         BlockActionType.BROKEN,
                         now,
                         BlockActionCause.EXPLOSION
@@ -311,7 +315,8 @@ public class BlockActionListener implements Listener {
                     block.getWorld().getName(),
                     block.getX(), block.getY(), block.getZ(),
                     block.getType().name(),
-                    block.getBlockData().getAsString()
+                    block.getBlockData().getAsString(),
+                    rollbackSkipReason(block)
             ));
         }
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
@@ -328,6 +333,7 @@ public class BlockActionListener implements Listener {
                         data.x(), data.y(), data.z(),
                         data.blockType(),
                         data.blockData(),
+                        data.rollbackSkipReason(),
                         BlockActionType.BROKEN,
                         now,
                         BlockActionCause.EXPLOSION
@@ -451,6 +457,7 @@ public class BlockActionListener implements Listener {
         int z = block.getZ();
         String blockType = block.getType().name();
         String blockData = block.getBlockData().getAsString();
+        String rollbackSkipReason = rollbackSkipReason(block);
         long now = System.currentTimeMillis();
 
         return db.enqueueBlockAction(
@@ -460,6 +467,7 @@ public class BlockActionListener implements Listener {
                 x, y, z,
                 blockType,
                 blockData,
+                rollbackSkipReason,
                 action,
                 now,
                 BlockActionCause.PLAYER
@@ -475,6 +483,21 @@ public class BlockActionListener implements Listener {
         }
 
         return type == Material.LEVER || Tag.BUTTONS.isTagged(type);
+    }
+
+    private static String rollbackSkipReason(Block block) {
+        if (block.getState() instanceof TileState) {
+            return "TILE_ENTITY";
+        }
+
+        Material type = block.getType();
+        if (type.name().endsWith("_BED")) {
+            return "MULTI_BLOCK";
+        }
+        if (block.getBlockData() instanceof Bisected && !Tag.TRAPDOORS.isTagged(type)) {
+            return "MULTI_BLOCK";
+        }
+        return null;
     }
 
     private static Map<Material, Integer> countItems(ItemStack[] contents) {
@@ -517,6 +540,7 @@ public class BlockActionListener implements Listener {
             int y,
             int z,
             String blockType,
-            String blockData
+            String blockData,
+            String rollbackSkipReason
     ) {}
 }
