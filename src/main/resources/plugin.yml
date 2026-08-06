@@ -1,15 +1,17 @@
 name: BlockLog
 main: org.markski.blocklog.Main
 version: 0.3.0
-api-version: 1.20
+api-version: '26.2'
 description: A lightweight block interaction logging plugin.
 authors: [ "Markski" ]
 libraries:
-  - org.xerial:sqlite-jdbc:3.46.0.0
+  - org.xerial:sqlite-jdbc:3.53.2.0
 
 commands:
   bkl:
     description: All BlockLog related commands.
+    permission: blocklog.use
+    permission-message: You do not have permission to use BlockLog.
 permissions:
   blocklog.use:
     description: Allows using /bkl base command.

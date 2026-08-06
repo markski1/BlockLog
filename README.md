@@ -21,8 +21,8 @@ To make a simple and lightweight plugin that doesn't implement an entire suite o
 - Logs creation and destruction of blocks, including explosions.
 - Logs block transactions.
 - Logging of block interaction, ie. opening and closing gates, chests.
-- Inspection command with `/blk i`.
-- Rollback with `/blk rollback` command. Experimental.
+- Inspection command with `/bkl i`.
+- Rollback with `/bkl rollback` command. Experimental.
 - Lightweight and straightforward. Should cause no performance degradation or blockage of main thread.
 
 ### User-facing TODO
@@ -41,12 +41,12 @@ To make a simple and lightweight plugin that doesn't implement an entire suite o
 ### Known issues
 
 - Container transactions: Currently transactions are related to a block, not a container. So you may have to check both blocks of a double chest, for example.
-- Not known, but `/blk rollback` is experimental.
+- Not known, but `/bkl rollback` is experimental.
 
 ### Install
 
 - Drag the .jar into your plugins folder.
-- Set up permissions if using those (`blocklog.inspect`, `blocklog.rollback`)
+- Set up permissions if using those (`blocklog.use`, `blocklog.inspect`, `blocklog.rollback`)
 - Done
 
 ### Contribution

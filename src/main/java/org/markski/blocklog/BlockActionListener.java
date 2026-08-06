@@ -14,8 +14,11 @@ import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 
@@ -24,9 +27,11 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 public class BlockActionListener implements Listener {
@@ -35,6 +40,11 @@ public class BlockActionListener implements Listener {
     private final DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
 
     private final Map<UUID, OpenContainerSession> openContainers = new HashMap<>();
+    private final Map<UUID, PendingContainerSession> pendingContainers = new HashMap<>();
+    private final Map<Inventory, UUID> trackedInventories = new HashMap<>();
+    private final Set<Inventory> conflictedInventories = new HashSet<>();
+    private final Map<UUID, InspectionTarget> pendingInspections = new HashMap<>();
+    private final Set<UUID> inspectionsInFlight = new HashSet<>();
 
     public BlockActionListener(Main plugin) {
         this.plugin = plugin;
@@ -75,6 +85,10 @@ public class BlockActionListener implements Listener {
         Player player = event.getPlayer();
         Action action = event.getAction();
 
+        if (event.getHand() != EquipmentSlot.HAND) {
+            return;
+        }
+
         if (!plugin.isInspecting(player.getUniqueId())
                 || (action != Action.LEFT_CLICK_BLOCK && action != Action.RIGHT_CLICK_BLOCK)) {
             return;
@@ -82,6 +96,7 @@ public class BlockActionListener implements Listener {
 
         Block clicked = event.getClickedBlock();
         if (clicked != null) {
+            event.setCancelled(true);
             inspectBlock(player, clicked);
         }
     }
@@ -90,6 +105,10 @@ public class BlockActionListener implements Listener {
     public void onPlayerInteract(PlayerInteractEvent event) {
         Player player = event.getPlayer();
         Action action = event.getAction();
+
+        if (event.getHand() != EquipmentSlot.HAND) {
+            return;
+        }
 
         if (action != Action.LEFT_CLICK_BLOCK && action != Action.RIGHT_CLICK_BLOCK) {
             return;
@@ -101,24 +120,28 @@ public class BlockActionListener implements Listener {
                 return;
             }
 
-            if (action == Action.RIGHT_CLICK_BLOCK && isInteractiveBlock(clicked)) {
+            if (action == Action.RIGHT_CLICK_BLOCK) {
+                BlockState state = clicked.getState();
+                boolean isContainer = state instanceof InventoryHolder;
+                if (!isContainer && !isInteractiveBlock(clicked)) {
+                    return;
+                }
+
                 String eventId = logAction(player, clicked, BlockActionType.INTERACTION);
 
-                // if it's a container, associate following inventory changes with this open-event UUID.
-                BlockState state = clicked.getState();
-                if (state instanceof InventoryHolder holder && eventId != null) {
-                    Map<Material, Integer> snapshot = countItems(holder.getInventory().getContents());
-
-                    openContainers.put(
-                            player.getUniqueId(),
-                            new OpenContainerSession(
-                                    eventId,
-                                    clicked.getWorld().getName(),
-                                    clicked.getX(),
-                                    clicked.getY(),
-                                    clicked.getZ(),
-                                    snapshot
-                            )
+                if (isContainer && eventId != null) {
+                    UUID playerId = player.getUniqueId();
+                    PendingContainerSession pending = new PendingContainerSession(
+                            eventId,
+                            clicked.getWorld().getName(),
+                            clicked.getX(),
+                            clicked.getY(),
+                            clicked.getZ()
+                    );
+                    pendingContainers.put(playerId, pending);
+                    plugin.getServer().getScheduler().runTask(
+                            plugin,
+                            () -> pendingContainers.remove(playerId, pending)
                     );
                 }
             }
@@ -128,37 +151,80 @@ public class BlockActionListener implements Listener {
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         UUID playerId = event.getPlayer().getUniqueId();
-        openContainers.remove(playerId);
+        discardContainerSession(playerId);
+        pendingContainers.remove(playerId);
+        pendingInspections.remove(playerId);
+        inspectionsInFlight.remove(playerId);
         plugin.removeInspecting(playerId);
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventoryOpen(InventoryOpenEvent event) {
+        if (!(event.getPlayer() instanceof Player player)) {
+            return;
+        }
+
+        PendingContainerSession pending = pendingContainers.remove(player.getUniqueId());
+        if (pending == null) {
+            return;
+        }
+
+        Inventory inventory = event.getView().getTopInventory();
+        if (conflictedInventories.contains(inventory)) {
+            return;
+        }
+
+        UUID playerId = player.getUniqueId();
+        UUID existingOwner = trackedInventories.get(inventory);
+        if (existingOwner != null && !existingOwner.equals(playerId)) {
+            discardContainerSession(existingOwner);
+            conflictedInventories.add(inventory);
+            return;
+        }
+
+        discardContainerSession(playerId);
+        trackedInventories.put(inventory, playerId);
+        openContainers.put(
+                playerId,
+                new OpenContainerSession(
+                        pending.eventId(),
+                        pending.worldName(),
+                        pending.x(),
+                        pending.y(),
+                        pending.z(),
+                        inventory,
+                        countItems(inventory.getContents())
+                )
+        );
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onInventoryClose(InventoryCloseEvent event) {
         if (!(event.getPlayer() instanceof Player player)) {
             return;
         }
 
-        InventoryHolder holder = event.getView().getTopInventory().getHolder();
-        if (!(holder instanceof BlockState blockState)) {
+        Inventory inventory = event.getView().getTopInventory();
+        if (conflictedInventories.contains(inventory)) {
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                if (inventory.getViewers().isEmpty()) {
+                    conflictedInventories.remove(inventory);
+                }
+            });
             return;
         }
 
-        OpenContainerSession session = openContainers.get(player.getUniqueId());
+        OpenContainerSession session = openContainers.remove(player.getUniqueId());
         if (session == null) {
             return;
         }
 
-        if (!session.worldName().equals(blockState.getWorld().getName())
-                || session.x() != blockState.getX()
-                || session.y() != blockState.getY()
-                || session.z() != blockState.getZ()) {
+        if (!session.inventory().equals(inventory)) {
             return;
         }
+        trackedInventories.remove(inventory);
 
-        openContainers.remove(player.getUniqueId());
-
-        // diff snapshot against final container contents.
-        Map<Material, Integer> after = countItems(event.getView().getTopInventory().getContents());
+        Map<Material, Integer> after = countItems(inventory.getContents());
 
         // figure out deltas.
         Map<Material, Integer> deltas = new HashMap<>();
@@ -197,6 +263,13 @@ public class BlockActionListener implements Listener {
         }
     }
 
+    private void discardContainerSession(UUID playerId) {
+        OpenContainerSession session = openContainers.remove(playerId);
+        if (session != null) {
+            trackedInventories.remove(session.inventory());
+        }
+    }
+
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onEntityExplode(EntityExplodeEvent event) {
         List<ExplosionBlockData> blocks = new ArrayList<>();
@@ -204,7 +277,8 @@ public class BlockActionListener implements Listener {
             blocks.add(new ExplosionBlockData(
                     block.getWorld().getName(),
                     block.getX(), block.getY(), block.getZ(),
-                    block.getType().name()
+                    block.getType().name(),
+                    block.getBlockData().getAsString()
             ));
         }
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
@@ -220,6 +294,7 @@ public class BlockActionListener implements Listener {
                         data.worldName(),
                         data.x(), data.y(), data.z(),
                         data.blockType(),
+                        data.blockData(),
                         BlockActionType.BROKEN,
                         now,
                         BlockActionCause.EXPLOSION
@@ -235,7 +310,8 @@ public class BlockActionListener implements Listener {
             blocks.add(new ExplosionBlockData(
                     block.getWorld().getName(),
                     block.getX(), block.getY(), block.getZ(),
-                    block.getType().name()
+                    block.getType().name(),
+                    block.getBlockData().getAsString()
             ));
         }
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
@@ -251,6 +327,7 @@ public class BlockActionListener implements Listener {
                         data.worldName(),
                         data.x(), data.y(), data.z(),
                         data.blockType(),
+                        data.blockData(),
                         BlockActionType.BROKEN,
                         now,
                         BlockActionCause.EXPLOSION
@@ -262,61 +339,102 @@ public class BlockActionListener implements Listener {
     private void inspectBlock(Player player, Block block) {
         var db = plugin.getDatabase();
         if (db == null || !db.isOpen()) {
-            player.sendMessage("§cDatabase not available.");
+            player.sendMessage("\u00A7cDatabase not available.");
             return;
         }
 
-        String worldName = block.getWorld().getName();
-        int x = block.getX();
-        int y = block.getY();
-        int z = block.getZ();
+        UUID playerId = player.getUniqueId();
+        pendingInspections.put(
+                playerId,
+                new InspectionTarget(
+                        block.getWorld().getName(),
+                        block.getX(),
+                        block.getY(),
+                        block.getZ()
+                )
+        );
+        if (!inspectionsInFlight.add(playerId)) {
+            return;
+        }
+        runInspectionQuery(player, playerId);
+    }
+
+    private void runInspectionQuery(Player player, UUID playerId) {
+        InspectionTarget target = pendingInspections.remove(playerId);
+        if (target == null) {
+            inspectionsInFlight.remove(playerId);
+            return;
+        }
+
         var server = plugin.getServer();
-
-        // Query db async so we don't block the main thread
+        var db = plugin.getDatabase();
         server.getScheduler().runTaskAsynchronously(plugin, () -> {
-            var entries = java.util.Collections.<org.markski.blocklog.Database.BlockLogEntry>emptyList();
+            List<Database.BlockLogEntry> entries = List.of();
+            SQLException queryError = null;
             try {
-                entries = db.getRecentActionsAtBlock(worldName, x, y, z, 10);
-            } catch (SQLException e) {
-                plugin.getLogger().severe("Failed to query block history. - " + e.getMessage());
-
-                server.getScheduler().runTask(plugin, () ->
-                        player.sendMessage("§cFailed to query block history. See console.")
+                entries = db.getRecentActionsAtBlock(
+                        target.worldName(),
+                        target.x(),
+                        target.y(),
+                        target.z(),
+                        10
                 );
-                return;
+            } catch (SQLException e) {
+                queryError = e;
             }
 
-            // Must send messages at the main thread.
-            var finalEntries = entries;
+            List<Database.BlockLogEntry> finalEntries = entries;
+            SQLException finalQueryError = queryError;
             server.getScheduler().runTask(plugin, () -> {
-                player.sendMessage("§e[History] §7" + "§f(" + x + ", " + y + ", " + z + "):");
-
-                if (finalEntries.isEmpty()) {
-                    player.sendMessage("§7No logged actions for this block.");
-                    return;
+                boolean superseded = pendingInspections.containsKey(playerId);
+                if (player.isOnline() && plugin.isInspecting(playerId) && !superseded) {
+                    if (finalQueryError == null) {
+                        sendInspectionResult(player, target, finalEntries);
+                    } else {
+                        plugin.getLogger().warning("Failed to query block history: "
+                                + finalQueryError.getMessage());
+                        player.sendMessage("\u00A7cFailed to query block history. Try again shortly.");
+                    }
                 }
 
-                for (var entry : finalEntries) {
-                    String timeStr = timeFormatter.format(
-                            Instant.ofEpochMilli(entry.createdAt())
-                    );
-                    String actionStr = switch (entry.action()) {
-                        case PLACED -> "§aPLACED";
-                        case BROKEN -> "§cBROKEN";
-                        case INTERACTION -> "§bINTERACTED";
-                    };
-
-                    String causeStr = entry.cause() != null
-                            ? entry.cause().name()
-                            : "UNKNOWN";
-
-                    player.sendMessage("§7[" + timeStr + "] " +
-                            "§b" + entry.playerName() + " §7" +
-                            actionStr + " §f" + entry.blockType() +
-                            " §8(" + causeStr + ")");
+                if (pendingInspections.containsKey(playerId)
+                        && player.isOnline()
+                        && plugin.isInspecting(playerId)) {
+                    runInspectionQuery(player, playerId);
+                } else {
+                    inspectionsInFlight.remove(playerId);
                 }
             });
         });
+    }
+
+    private void sendInspectionResult(
+            Player player,
+            InspectionTarget target,
+            List<Database.BlockLogEntry> entries
+    ) {
+        player.sendMessage("\u00A7e[History] \u00A7f(" + target.x() + ", "
+                + target.y() + ", " + target.z() + "):");
+
+        if (entries.isEmpty()) {
+            player.sendMessage("\u00A77No logged actions for this block.");
+            return;
+        }
+
+        for (Database.BlockLogEntry entry : entries) {
+            String timeStr = timeFormatter.format(Instant.ofEpochMilli(entry.createdAt()));
+            String actionStr = switch (entry.action()) {
+                case PLACED -> "\u00A7aPLACED";
+                case BROKEN -> "\u00A7cBROKEN";
+                case INTERACTION -> "\u00A7bINTERACTED";
+            };
+
+            String causeStr = entry.cause() != null ? entry.cause().name() : "UNKNOWN";
+            player.sendMessage("\u00A77[" + timeStr + "] "
+                    + "\u00A7b" + entry.playerName() + " \u00A77"
+                    + actionStr + " \u00A7f" + entry.blockType()
+                    + " \u00A78(" + causeStr + ")");
+        }
     }
 
     private String logAction(Player player, Block block, BlockActionType action) {
@@ -332,6 +450,7 @@ public class BlockActionListener implements Listener {
         int y = block.getY();
         int z = block.getZ();
         String blockType = block.getType().name();
+        String blockData = block.getBlockData().getAsString();
         long now = System.currentTimeMillis();
 
         return db.enqueueBlockAction(
@@ -340,6 +459,7 @@ public class BlockActionListener implements Listener {
                 worldName,
                 x, y, z,
                 blockType,
+                blockData,
                 action,
                 now,
                 BlockActionCause.PLAYER
@@ -354,28 +474,7 @@ public class BlockActionListener implements Listener {
             return true;
         }
 
-        // stuff with inventories
-        BlockState state = block.getState();
-        if (state instanceof InventoryHolder) {
-            return true;
-        }
-
-        // buttons
-        return switch (type) {
-            case LEVER,
-                 STONE_BUTTON,
-                 OAK_BUTTON,
-                 SPRUCE_BUTTON,
-                 BIRCH_BUTTON,
-                 JUNGLE_BUTTON,
-                 ACACIA_BUTTON,
-                 DARK_OAK_BUTTON,
-                 CRIMSON_BUTTON,
-                 WARPED_BUTTON,
-                 POLISHED_BLACKSTONE_BUTTON ->
-                    true;
-            default -> false;
-        };
+        return type == Material.LEVER || Tag.BUTTONS.isTagged(type);
     }
 
     private static Map<Material, Integer> countItems(ItemStack[] contents) {
@@ -404,8 +503,20 @@ public class BlockActionListener implements Listener {
             int x,
             int y,
             int z,
+            Inventory inventory,
             Map<Material, Integer> snapshot
     ) {}
 
-    private record ExplosionBlockData(String worldName, int x, int y, int z, String blockType) {}
+    private record PendingContainerSession(String eventId, String worldName, int x, int y, int z) {}
+
+    private record InspectionTarget(String worldName, int x, int y, int z) {}
+
+    private record ExplosionBlockData(
+            String worldName,
+            int x,
+            int y,
+            int z,
+            String blockType,
+            String blockData
+    ) {}
 }

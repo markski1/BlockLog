@@ -2,41 +2,42 @@ package org.markski.blocklog;
 
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.sql.SQLException;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
 
 public class Main extends JavaPlugin {
 
-    private Database database;
+    private volatile Database database;
     private final Set<UUID> inspectingPlayers =
             ConcurrentHashMap.newKeySet();
 
     @Override
     public void onEnable() {
-        getLogger().info("BlockLog loaded.");
-
         database = new Database(this);
-        try {
-            database.open();
-            getLogger().info("Database initialized.");
-        } catch (SQLException e) {
-            getLogger().severe("Failed to initialize database: " + e.getMessage());
-            getServer().getPluginManager().disablePlugin(this);
-            return;
-        }
+        Objects.requireNonNull(getCommand("bkl"), "Command 'bkl' not defined in plugin.yml")
+                .setExecutor(new BklCommand(this));
 
-        getServer().getPluginManager().registerEvents(new BlockActionListener(this), this);
+        database.openAsync().whenComplete((ignored, error) -> {
+            if (!isEnabled()) {
+                return;
+            }
+            getServer().getScheduler().runTask(this, () -> {
+                if (error != null) {
+                    getLogger().log(Level.SEVERE, "Failed to initialize database.", error);
+                    getServer().getPluginManager().disablePlugin(this);
+                    return;
+                }
+                if (!isEnabled()) {
+                    return;
+                }
 
-        if (getCommand("bkl") != null) {
-            Objects.requireNonNull(getCommand("bkl")).setExecutor(new BklCommand(this));
-        } else {
-            getLogger().severe("Command 'bkl' not defined in plugin.yml");
-        }
-
-        getLogger().info("BlockLog loaded.");
+                getServer().getPluginManager().registerEvents(new BlockActionListener(this), this);
+                getLogger().info("BlockLog loaded.");
+            });
+        });
     }
 
     @Override
@@ -56,13 +57,11 @@ public class Main extends JavaPlugin {
     }
 
     public boolean toggleInspect(UUID playerId) {
-        if (inspectingPlayers.contains(playerId)) {
-            inspectingPlayers.remove(playerId);
+        if (inspectingPlayers.remove(playerId)) {
             return false;
-        } else {
-            inspectingPlayers.add(playerId);
-            return true;
         }
+        inspectingPlayers.add(playerId);
+        return true;
     }
 
     public void removeInspecting(UUID playerId) {
