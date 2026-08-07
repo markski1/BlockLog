@@ -4,7 +4,8 @@ public enum BlockActionCause {
     PLAYER(1),
     EXPLOSION(2),
     PISTON(3),
-    MOB(4);
+    MOB(4),
+    AUTOMATION(5);
 
     private final int code;
 

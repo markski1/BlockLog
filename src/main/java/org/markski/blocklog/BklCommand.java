@@ -1,5 +1,9 @@
 package org.markski.blocklog;
 
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.World;
@@ -61,14 +65,14 @@ public class BklCommand implements CommandExecutor {
             return false;
         }
         if (!(sender instanceof Player executor)) {
-            sender.sendMessage("This command can only be used by a player.");
+            sender.sendMessage(Messages.error("This command can only be used by a player."));
             return true;
         }
         if (args.length == 0) {
             Database db = plugin.getDatabase();
             executor.sendMessage(db != null && db.isOpen()
-                    ? "BlockLog is loaded."
-                    : "BlockLog is still initializing.");
+                    ? Messages.success("BlockLog is loaded.")
+                    : Messages.info("BlockLog is still initializing."));
             return true;
         }
         if (args[0].equalsIgnoreCase("i")) {
@@ -76,6 +80,9 @@ public class BklCommand implements CommandExecutor {
         }
         if (args[0].equalsIgnoreCase("rollback")) {
             return handleRollback(executor, args);
+        }
+        if (args[0].equalsIgnoreCase("page")) {
+            return showInspectionPage(executor, args);
         }
 
         sendUsage(executor);
@@ -93,27 +100,56 @@ public class BklCommand implements CommandExecutor {
 
     private boolean toggleInspect(Player executor) {
         if (!executor.hasPermission("blocklog.inspect")) {
-            executor.sendMessage("\u00A7cYou don't have permission to use /bkl i.");
+            executor.sendMessage(Messages.error("You don't have permission to use /bkl i."));
             return true;
         }
 
         Database db = plugin.getDatabase();
         if (db == null || !db.isOpen()) {
-            executor.sendMessage("\u00A7cDatabase not available.");
+            executor.sendMessage(Messages.error("Database not available."));
             return true;
         }
         db.requestFlush();
 
         boolean nowInspecting = plugin.toggleInspect(executor.getUniqueId());
         executor.sendMessage(nowInspecting
-                ? "\u00A7aBlockLog inspect mode enabled\u00A7f. Hit or place blocks to inspect them."
-                : "\u00A7cBlockLog inspect mode disabled\u00A7f.");
+                ? Messages.success("BlockLog inspect mode enabled. Hit or place blocks to inspect them.")
+                : Messages.info("BlockLog inspect mode disabled."));
+        return true;
+    }
+
+    private boolean showInspectionPage(Player executor, String[] args) {
+        if (!executor.hasPermission("blocklog.inspect")) {
+            executor.sendMessage(Messages.error("You don't have permission to inspect blocks."));
+            return true;
+        }
+        if (args.length != 2) {
+            executor.sendMessage(Messages.error("Usage: /bkl page <number>"));
+            return true;
+        }
+        int page;
+        try {
+            page = Integer.parseInt(args[1]);
+        } catch (NumberFormatException e) {
+            executor.sendMessage(Messages.error("Page must be a number."));
+            return true;
+        }
+        if (page < 1 || page > 100_000) {
+            executor.sendMessage(Messages.error("Page must be between 1 and 100000."));
+            return true;
+        }
+        BlockActionListener listener = plugin.getBlockActionListener();
+        if (listener == null) {
+            executor.sendMessage(Messages.error("BlockLog is still initializing."));
+            return true;
+        }
+        listener.showInspectionPage(executor, page);
         return true;
     }
 
     private boolean handleRollback(Player executor, String[] args) {
         if (!executor.hasPermission("blocklog.rollback")) {
-            executor.sendMessage("\u00A7cYou don't have permission to use /bkl rollback.");
+            executor.sendMessage(Messages.error("You don't have permission to use /bkl rollback."));
             return true;
         }
         if (args.length < 2) {
@@ -135,11 +171,11 @@ public class BklCommand implements CommandExecutor {
 
     private boolean previewRollback(Player executor, String[] args) {
         if (args.length != 5) {
-            executor.sendMessage("\u00A7cUsage: /bkl rollback preview <playerName> <hours> <radius>");
+            executor.sendMessage(Messages.error("Usage: /bkl rollback preview <playerName> <hours> <radius>"));
             return true;
         }
         if (!previewsInFlight.add(executor.getUniqueId())) {
-            executor.sendMessage("\u00A7cA rollback preview is already running.");
+            executor.sendMessage(Messages.error("A rollback preview is already running."));
             return true;
         }
 
@@ -152,13 +188,13 @@ public class BklCommand implements CommandExecutor {
         Database db = plugin.getDatabase();
         if (db == null || !db.isOpen()) {
             previewsInFlight.remove(executor.getUniqueId());
-            executor.sendMessage("\u00A7cDatabase not available.");
+            executor.sendMessage(Messages.error("Database not available."));
             return true;
         }
 
         pendingRollbacks.remove(executor.getUniqueId());
         cancelledPreviews.remove(executor.getUniqueId());
-        executor.sendMessage("\u00A7eCalculating rollback preview...");
+        executor.sendMessage(Messages.info("Calculating rollback preview..."));
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
                 db.flushPendingActionsNow();
@@ -166,7 +202,7 @@ public class BklCommand implements CommandExecutor {
                 Bukkit.getScheduler().runTask(plugin, () -> finishPreview(executor, request, entries));
             } catch (SQLException | IllegalArgumentException e) {
                 plugin.getLogger().severe("Rollback preview failed: " + e.getMessage());
-                finishPreviewFailure(executor, "\u00A7cRollback preview failed. Check the console.");
+                finishPreviewFailure(executor, Messages.error("Rollback preview failed. Check the console."));
             }
         });
         return true;
@@ -183,19 +219,19 @@ public class BklCommand implements CommandExecutor {
             return;
         }
         if (entries.size() > MAX_ROLLBACK_ENTRIES) {
-            executor.sendMessage("\u00A7cPreview matched more than " + MAX_ROLLBACK_ENTRIES
-                    + " events. Use a smaller time window or radius.");
+            executor.sendMessage(Messages.error("Preview matched more than " + MAX_ROLLBACK_ENTRIES
+                    + " events. Use a smaller time window or radius."));
             return;
         }
         if (entries.isEmpty()) {
-            executor.sendMessage("\u00A77No actions found in that rollback scope.");
+            executor.sendMessage(Messages.muted("No actions found in that rollback scope."));
             return;
         }
 
         RollbackSummary summary = summarize(entries);
         if (summary.supportedEvents() == 0) {
-            executor.sendMessage("\u00A7cAll matching events are unsupported and will be skipped.");
-            executor.sendMessage("\u00A77Unsupported: " + formatReasons(summary.unsupportedReasons()));
+            executor.sendMessage(Messages.error("All matching events are unsupported and will be skipped."));
+            executor.sendMessage(Messages.muted("Unsupported: " + formatReasons(summary.unsupportedReasons())));
             return;
         }
         String token = createToken();
@@ -212,17 +248,25 @@ public class BklCommand implements CommandExecutor {
                 PREVIEW_EXPIRY_MILLIS / 50L
         );
 
-        executor.sendMessage("\u00A7eRollback preview: \u00A7b" + summary.totalEvents()
-                + "\u00A7e events across \u00A7b" + summary.chunkCount() + "\u00A7e chunks.");
-        executor.sendMessage("\u00A7aSupported: " + summary.supportedEvents()
-                + " \u00A77| \u00A7cUnsupported/skipped: " + summary.unsupportedEvents());
+        executor.sendMessage(Component.text("Rollback preview: ", NamedTextColor.YELLOW)
+                .append(Component.text(summary.totalEvents(), NamedTextColor.AQUA))
+                .append(Component.text(" events across ", NamedTextColor.YELLOW))
+                .append(Component.text(summary.chunkCount(), NamedTextColor.AQUA))
+                .append(Component.text(" chunks.", NamedTextColor.YELLOW)));
+        executor.sendMessage(Component.text("Supported: " + summary.supportedEvents(), NamedTextColor.GREEN)
+                .append(Component.text(" | ", NamedTextColor.GRAY))
+                .append(Component.text("Unsupported/skipped: " + summary.unsupportedEvents(), NamedTextColor.RED)));
         if (!summary.unsupportedReasons().isEmpty()) {
-            executor.sendMessage("\u00A77Unsupported: " + formatReasons(summary.unsupportedReasons()));
+            executor.sendMessage(Messages.muted("Unsupported: " + formatReasons(summary.unsupportedReasons())));
         }
-        executor.sendMessage("\u00A7eConfirm within 60 seconds using \u00A7f/bkl rollback confirm " + token);
+        String confirmCommand = "/bkl rollback confirm " + token;
+        executor.sendMessage(Component.text("Confirm within 60 seconds: ", NamedTextColor.YELLOW)
+                .append(Component.text("[Confirm rollback]", NamedTextColor.RED)
+                        .hoverEvent(HoverEvent.showText(Component.text(confirmCommand, NamedTextColor.GRAY)))
+                        .clickEvent(ClickEvent.runCommand(confirmCommand))));
     }
 
-    private void finishPreviewFailure(Player executor, String message) {
+    private void finishPreviewFailure(Player executor, Component message) {
         if (!plugin.isEnabled()) {
             return;
         }
@@ -236,7 +280,7 @@ public class BklCommand implements CommandExecutor {
 
     private boolean confirmRollback(Player executor, String[] args) {
         if (args.length != 3) {
-            executor.sendMessage("\u00A7cUsage: /bkl rollback confirm <token>");
+            executor.sendMessage(Messages.error("Usage: /bkl rollback confirm <token>"));
             return true;
         }
 
@@ -246,11 +290,11 @@ public class BklCommand implements CommandExecutor {
                 || pending.expiresAt() < System.currentTimeMillis()
                 || !pending.token().equalsIgnoreCase(args[2])) {
             pendingRollbacks.remove(executorId);
-            executor.sendMessage("\u00A7cNo matching rollback preview exists, or its token expired.");
+            executor.sendMessage(Messages.error("No matching rollback preview exists, or its token expired."));
             return true;
         }
         if (!rollbackInProgress.compareAndSet(false, true)) {
-            executor.sendMessage("\u00A7cAnother rollback is already running.");
+            executor.sendMessage(Messages.error("Another rollback is already running."));
             return true;
         }
         pendingRollbacks.remove(executorId);
@@ -258,24 +302,24 @@ public class BklCommand implements CommandExecutor {
         Database db = plugin.getDatabase();
         if (db == null || !db.isOpen()) {
             rollbackInProgress.set(false);
-            executor.sendMessage("\u00A7cDatabase not available.");
+            executor.sendMessage(Messages.error("Database not available."));
             return true;
         }
 
-        executor.sendMessage("\u00A7eRevalidating rollback scope...");
+        executor.sendMessage(Messages.info("Revalidating rollback scope..."));
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
                 db.flushPendingActionsNow();
                 List<Database.RollbackEntry> entries = loadEntries(db, pending.request());
                 if (entries.isEmpty() || entries.size() > MAX_ROLLBACK_ENTRIES) {
-                    finishPreparation(executor, "\u00A7cRollback scope is now empty or too large. Preview it again.");
+                    finishPreparation(executor, Messages.error("Rollback scope is now empty or too large. Preview it again."));
                     return;
                 }
 
                 RollbackSummary actual = summarize(entries);
                 if (!actual.targetUuid().equals(pending.summary().targetUuid())
                         || !actual.fingerprint().equals(pending.summary().fingerprint())) {
-                    finishPreparation(executor, "\u00A7cThe rollback scope changed. Preview it again.");
+                    finishPreparation(executor, Messages.error("The rollback scope changed. Preview it again."));
                     return;
                 }
 
@@ -284,7 +328,7 @@ public class BklCommand implements CommandExecutor {
                 db.createRollbackAudit(audit).whenComplete((ignored, error) -> {
                     if (error != null) {
                         plugin.getLogger().severe("Failed to create rollback audit: " + error.getMessage());
-                        finishPreparation(executor, "\u00A7cRollback audit could not be persisted; no blocks were changed.");
+                        finishPreparation(executor, Messages.error("Rollback audit could not be persisted; no blocks were changed."));
                         return;
                     }
                     if (!plugin.isEnabled()) {
@@ -302,7 +346,7 @@ public class BklCommand implements CommandExecutor {
                 });
             } catch (SQLException | IllegalArgumentException e) {
                 plugin.getLogger().severe("Rollback preparation failed: " + e.getMessage());
-                finishPreparation(executor, "\u00A7cRollback preparation failed. Check the console.");
+                finishPreparation(executor, Messages.error("Rollback preparation failed. Check the console."));
             }
         });
         return true;
@@ -328,7 +372,7 @@ public class BklCommand implements CommandExecutor {
         }
 
         activeRollback = new RollbackTask(executor, world, entries, auditId);
-        executor.sendMessage("\u00A7eRollback started. Use \u00A7f/bkl rollback cancel \u00A7eto stop it.");
+        executor.sendMessage(Messages.info("Rollback started. Use /bkl rollback cancel to stop it."));
         activeRollback.run();
     }
 
@@ -345,8 +389,8 @@ public class BklCommand implements CommandExecutor {
         }
 
         executor.sendMessage(cancelled
-                ? "\u00A7eRollback preview or execution cancellation requested."
-                : "\u00A77You have no rollback to cancel.");
+                ? Messages.info("Rollback preview or execution cancellation requested.")
+                : Messages.muted("You have no rollback to cancel."));
         return true;
     }
 
@@ -357,18 +401,18 @@ public class BklCommand implements CommandExecutor {
         }
         PendingRollback pending = pendingRollbacks.get(executor.getUniqueId());
         if (pending != null && pending.expiresAt() >= System.currentTimeMillis()) {
-            executor.sendMessage("\u00A7eA preview is awaiting confirmation for "
+            executor.sendMessage(Messages.info("A preview is awaiting confirmation for "
                     + Math.max(0, (pending.expiresAt() - System.currentTimeMillis()) / 1000)
-                    + " more seconds.");
+                    + " more seconds."));
             return true;
         }
-        executor.sendMessage("\u00A77No rollback is active.");
+        executor.sendMessage(Messages.muted("No rollback is active."));
         return true;
     }
 
     private RollbackRequest parseRequest(Player executor, String targetName, String hoursArg, String radiusArg) {
         if (!PLAYER_NAME_PATTERN.matcher(targetName).matches()) {
-            executor.sendMessage("\u00A7cPlayer name must contain 1-16 letters, numbers, or underscores.");
+            executor.sendMessage(Messages.error("Player name must contain 1-16 letters, numbers, or underscores."));
             return null;
         }
 
@@ -378,16 +422,16 @@ public class BklCommand implements CommandExecutor {
             hours = Integer.parseInt(hoursArg);
             radius = Integer.parseInt(radiusArg);
         } catch (NumberFormatException e) {
-            executor.sendMessage("\u00A7cHours and radius must be numbers.");
+            executor.sendMessage(Messages.error("Hours and radius must be numbers."));
             return null;
         }
         if (hours <= 0 || radius <= 0) {
-            executor.sendMessage("\u00A7cHours and radius must be greater than 0.");
+            executor.sendMessage(Messages.error("Hours and radius must be greater than 0."));
             return null;
         }
         if (hours > MAX_ROLLBACK_HOURS || radius > MAX_ROLLBACK_RADIUS) {
-            executor.sendMessage("\u00A7cMaximum rollback scope is " + MAX_ROLLBACK_HOURS
-                    + " hours and radius " + MAX_ROLLBACK_RADIUS + ".");
+            executor.sendMessage(Messages.error("Maximum rollback scope is " + MAX_ROLLBACK_HOURS
+                    + " hours and radius " + MAX_ROLLBACK_RADIUS + "."));
             return null;
         }
 
@@ -502,7 +546,7 @@ public class BklCommand implements CommandExecutor {
         return HexFormat.of().withUpperCase().formatHex(bytes);
     }
 
-    private void finishPreparation(Player executor, String message) {
+    private void finishPreparation(Player executor, Component message) {
         rollbackInProgress.set(false);
         if (!plugin.isEnabled()) {
             return;
@@ -521,12 +565,12 @@ public class BklCommand implements CommandExecutor {
     }
 
     private static void sendUsage(Player player) {
-        player.sendMessage("Usage: /bkl i | /bkl rollback <preview|confirm|cancel|status>");
+        player.sendMessage(Messages.info("Usage: /bkl i | /bkl page <number> | /bkl rollback <preview|confirm|cancel|status>"));
     }
 
     private static void sendRollbackUsage(Player player) {
-        player.sendMessage("\u00A7cUsage: /bkl rollback preview <playerName> <hours> <radius>");
-        player.sendMessage("\u00A7c       /bkl rollback confirm <token> | cancel | status");
+        player.sendMessage(Messages.error("Usage: /bkl rollback preview <playerName> <hours> <radius>"));
+        player.sendMessage(Messages.error("       /bkl rollback confirm <token> | cancel | status"));
     }
 
     private final class RollbackTask implements Runnable {
@@ -562,9 +606,12 @@ public class BklCommand implements CommandExecutor {
             cancelRequested = true;
         }
 
-        private String progressMessage() {
-            return "\u00A7eRollback progress: \u00A7b" + index + "/" + entries.size()
-                    + "\u00A7e processed, \u00A7a" + affected + " changed, \u00A77" + skipped + " skipped.";
+        private Component progressMessage() {
+            return Component.text("Rollback progress: ", NamedTextColor.YELLOW)
+                    .append(Component.text(index + "/" + entries.size(), NamedTextColor.AQUA))
+                    .append(Component.text(" processed, ", NamedTextColor.YELLOW))
+                    .append(Component.text(affected + " changed, ", NamedTextColor.GREEN))
+                    .append(Component.text(skipped + " skipped.", NamedTextColor.GRAY));
         }
 
         @Override
@@ -683,8 +730,10 @@ public class BklCommand implements CommandExecutor {
             activeRollback = null;
             rollbackInProgress.set(false);
             if (notifyExecutor && executor.isOnline()) {
-                executor.sendMessage("\u00A7e" + message + " \u00A7a" + affected
-                        + " changed, \u00A77" + skipped + " skipped (" + unsupported + " unsupported).");
+                executor.sendMessage(Component.text(message + " ", NamedTextColor.YELLOW)
+                        .append(Component.text(affected + " changed, ", NamedTextColor.GREEN))
+                        .append(Component.text(skipped + " skipped (" + unsupported + " unsupported).",
+                                NamedTextColor.GRAY)));
             }
         }
     }

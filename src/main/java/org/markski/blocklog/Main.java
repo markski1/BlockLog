@@ -2,6 +2,9 @@ package org.markski.blocklog;
 
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.time.DateTimeException;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -12,11 +15,15 @@ public class Main extends JavaPlugin {
 
     private volatile Database database;
     private BklCommand commandExecutor;
+    private BlockActionListener blockActionListener;
+    private DateTimeFormatter timestampFormatter;
     private final Set<UUID> inspectingPlayers =
             ConcurrentHashMap.newKeySet();
 
     @Override
     public void onEnable() {
+        saveDefaultConfig();
+        timestampFormatter = createTimestampFormatter();
         database = new Database(this);
         commandExecutor = new BklCommand(this);
         Objects.requireNonNull(getCommand("bkl"), "Command 'bkl' not defined in plugin.yml")
@@ -36,7 +43,8 @@ public class Main extends JavaPlugin {
                     return;
                 }
 
-                getServer().getPluginManager().registerEvents(new BlockActionListener(this), this);
+                blockActionListener = new BlockActionListener(this);
+                getServer().getPluginManager().registerEvents(blockActionListener, this);
                 getLogger().info("BlockLog loaded.");
             });
         });
@@ -57,6 +65,14 @@ public class Main extends JavaPlugin {
         return database;
     }
 
+    public BlockActionListener getBlockActionListener() {
+        return blockActionListener;
+    }
+
+    public DateTimeFormatter getTimestampFormatter() {
+        return timestampFormatter;
+    }
+
     public boolean isInspecting(UUID playerId) {
         return inspectingPlayers.contains(playerId);
     }
@@ -71,5 +87,16 @@ public class Main extends JavaPlugin {
 
     public void removeInspecting(UUID playerId) {
         inspectingPlayers.remove(playerId);
+    }
+
+    private DateTimeFormatter createTimestampFormatter() {
+        String configured = getConfig().getString("display.timezone", "UTC");
+        try {
+            ZoneId zone = ZoneId.of(configured);
+            return DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z").withZone(zone);
+        } catch (DateTimeException e) {
+            getLogger().warning("Invalid display.timezone '" + configured + "'; using UTC.");
+            return DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z").withZone(ZoneId.of("UTC"));
+        }
     }
 }

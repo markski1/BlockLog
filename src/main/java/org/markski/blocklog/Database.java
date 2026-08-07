@@ -822,27 +822,54 @@ public class Database {
             long createdAt
     ) {}
 
-    public List<BlockLogEntry> getRecentActionsAtBlock(String worldName, int x, int y, int z, int limit) throws SQLException {
+    public BlockHistoryPage getActionsAtBlockPage(
+            String worldName,
+            int x,
+            int y,
+            int z,
+            int requestedPage,
+            int pageSize
+    ) throws SQLException {
         if (!isOpen()) {
             throw new SQLException("Database not available.");
         }
-        if (limit < 1 || limit > 100) {
-            throw new IllegalArgumentException("History limit must be between 1 and 100.");
+        if (requestedPage < 1 || pageSize < 1 || pageSize > 20) {
+            throw new IllegalArgumentException("Invalid history page request.");
         }
 
         String sql = """
-                SELECT player_name,
-                       block_type,
-                       action,
-                       created_at,
-                       cause
+                SELECT e.player_name,
+                       e.block_type,
+                       e.action,
+                       e.created_at,
+                       e.cause,
+                       (
+                           SELECT GROUP_CONCAT(tx.item_type || ':' || tx.delta, ',')
+                           FROM (
+                               SELECT t.item_type, t.delta
+                               FROM container_transactions t
+                               WHERE t.event_id = e.id
+                               ORDER BY t.created_at DESC, t.rowid DESC
+                               LIMIT 20
+                           ) tx
+                       ) AS transaction_summary,
+                       (
+                           SELECT COUNT(*)
+                           FROM container_transactions t
+                           WHERE t.event_id = e.id
+                       ) AS transaction_count
+                FROM events e
+                WHERE e.world = ?
+                  AND e.x = ?
+                  AND e.y = ?
+                  AND e.z = ?
+                ORDER BY e.created_at DESC, e.rowid DESC
+                LIMIT ? OFFSET ?;
+                """;
+        String countSql = """
+                SELECT COUNT(*)
                 FROM events
-                WHERE world = ?
-                  AND x = ?
-                  AND y = ?
-                  AND z = ?
-                ORDER BY created_at DESC, rowid DESC
-                LIMIT ?;
+                WHERE world = ? AND x = ? AND y = ? AND z = ?;
                 """;
 
         List<BlockLogEntry> result = new ArrayList<>();
@@ -850,45 +877,48 @@ public class Database {
         Connection c = null;
         try {
             c = borrowReadConnection();
-            PreparedStatement ps = c.prepareStatement(sql);
-
-            ps.setString(1, worldName);
-            ps.setInt(2, x);
-            ps.setInt(3, y);
-            ps.setInt(4, z);
-            ps.setInt(5, limit);
-
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    String playerName = rs.getString("player_name");
-                    String blockType = rs.getString("block_type");
-                    int actionCode = rs.getInt("action");
-                    long createdAt = rs.getLong("created_at");
-                    int causeCode = rs.getInt("cause");
-                    boolean causeWasNull = rs.wasNull();
-
-                    BlockActionType action = BlockActionType.fromCode(actionCode);
-                    BlockActionCause cause = null;
-                    if (!causeWasNull) {
-                        cause = BlockActionCause.fromCode(causeCode);
-                    }
-
-                    result.add(new BlockLogEntry(
-                            playerName,
-                            blockType,
-                            action,
-                            createdAt,
-                            cause
-                    ));
+            int totalEntries;
+            try (PreparedStatement countPs = c.prepareStatement(countSql)) {
+                countPs.setString(1, worldName);
+                countPs.setInt(2, x);
+                countPs.setInt(3, y);
+                countPs.setInt(4, z);
+                try (ResultSet rs = countPs.executeQuery()) {
+                    totalEntries = rs.next() ? rs.getInt(1) : 0;
                 }
-            } finally {
-                ps.close();
             }
+            int totalPages = Math.max(1, (totalEntries + pageSize - 1) / pageSize);
+            int page = Math.min(requestedPage, totalPages);
+
+            try (PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setString(1, worldName);
+                ps.setInt(2, x);
+                ps.setInt(3, y);
+                ps.setInt(4, z);
+                ps.setInt(5, pageSize);
+                ps.setInt(6, (page - 1) * pageSize);
+
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        int causeCode = rs.getInt("cause");
+                        boolean causeWasNull = rs.wasNull();
+                        result.add(new BlockLogEntry(
+                                rs.getString("player_name"),
+                                rs.getString("block_type"),
+                                BlockActionType.fromCode(rs.getInt("action")),
+                                rs.getLong("created_at"),
+                                causeWasNull ? null : BlockActionCause.fromCode(causeCode),
+                                rs.getString("transaction_summary"),
+                                rs.getInt("transaction_count")
+                        ));
+                    }
+                }
+            }
+
+            return new BlockHistoryPage(List.copyOf(result), page, totalPages, totalEntries);
         } finally {
             returnReadConnection(c);
         }
-
-        return result;
     }
 
     public List<RollbackEntry> getActionsForRollback(
@@ -1036,5 +1066,20 @@ public class Database {
         FAILED
     }
 
-    public record BlockLogEntry(String playerName, String blockType, BlockActionType action, long createdAt, BlockActionCause cause) {}
+    public record BlockLogEntry(
+            String playerName,
+            String blockType,
+            BlockActionType action,
+            long createdAt,
+            BlockActionCause cause,
+            String transactionSummary,
+            int transactionCount
+    ) {}
+
+    public record BlockHistoryPage(
+            List<BlockLogEntry> entries,
+            int page,
+            int totalPages,
+            int totalEntries
+    ) {}
 }

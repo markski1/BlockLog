@@ -20,8 +20,8 @@ To make a simple and lightweight plugin that doesn't implement an entire suite o
 
 - Logs creation and destruction of blocks, including explosions.
 - Logs block transactions.
-- Logging of block interaction, ie. opening and closing gates, chests.
-- Inspection command with `/bkl i`.
+- Event-attributed container logging for player clicks and drags, transfers, pickups, furnaces, and brewing stands.
+- Inspection command with `/bkl i`, paginated history, clickable navigation, and copyable result details.
 - Rollback command has preview, before confirmation.
 - Lightweight and straightforward. Should cause no performance degradation or blockage of main thread.
 
@@ -41,6 +41,7 @@ To make a simple and lightweight plugin that doesn't implement an entire suite o
 ### Known issues
 
 - Container transactions: Currently transactions are related to a block, not a container. So you may have to check both blocks of a double chest, for example.
+- Container actions that cannot be attributed exactly, including bundle operations and partial shift-click transfers, are skipped rather than guessed. Direct inventory mutations by plugins without a corresponding Paper event are not logged.
 - Not known, but `/bkl rollback` is experimental.
 
 ### Install
@@ -48,6 +49,8 @@ To make a simple and lightweight plugin that doesn't implement an entire suite o
 - Drag the .jar into your plugins folder.
 - Set up permissions if using those (`blocklog.use`, `blocklog.inspect`, `blocklog.rollback`)
 - Done
+
+The timestamp timezone defaults to UTC. Set `display.timezone` in `plugins/BlockLog/config.yml` to another valid IANA timezone, such as `America/Argentina/Buenos_Aires`, and restart the server to change it.
 
 ### Rollback
 
