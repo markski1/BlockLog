@@ -16,7 +16,7 @@ java {
 }
 
 dependencies {
-    compileOnly 'io.papermc.paper:paper-api:26.2.build.65-beta'
+    compileOnly 'io.papermc.paper:paper-api:26.2-rc-2.build.9-alpha'
     compileOnly 'org.xerial:sqlite-jdbc:3.53.2.0'
 }
 
