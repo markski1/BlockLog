@@ -25,7 +25,7 @@ jobs:
           cache: gradle
 
       - name: Validate Gradle wrapper
-        uses: gradle/actions/wrapper-validation@11d4d83c63a6ce61b32d8a9c4faddbdb04fe9917 # v6
+        uses: gradle/actions/wrapper-validation@ecf8cf2dcee84990dee44a7479c2b268de61e38d # v6
 
       - name: Build, lint, test, and generate SBOM
         run: ./gradlew --no-daemon --stacktrace clean check
